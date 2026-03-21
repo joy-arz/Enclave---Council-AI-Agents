@@ -304,3 +304,9 @@ enclave/
 | `DEFAULT_TEMPERATURE` | `0.7` | Sampling temperature |
 | `HOST` | `127.0.0.1` | Server bind address |
 | `PORT` | `8000` | Server port |
+
+---
+
+## License
+
+This project is licensed under the MIT License - see [LICENSE](LICENSE) for details.
