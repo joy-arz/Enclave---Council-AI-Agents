@@ -24,6 +24,7 @@ use crate::utils::logger_mod::session_logger;
 pub struct enclave_params {
     pub query: String,
     pub rounds: Option<usize>,
+    pub auto_rounds: Option<bool>,  // if true, judge decides when to stop
     pub session_id: Option<String>,
     pub autonomous: Option<bool>,
     pub workspace_dir: Option<String>,
@@ -146,11 +147,15 @@ pub async fn handle_enclave(
 
     let mut judge = judge_agent::new(judge_provider, "cli", config_inst.default_temperature, 1000);
     judge.base.set_autonomous(autonomous);
-    
+
+    // auto_rounds defaults to true (judge decides when to stop)
+    let auto_rounds = params.auto_rounds.unwrap_or(true);
+
     let mut orchestrator_inst = orchestrator::new(
         agents,
         judge,
         params.rounds.unwrap_or(config_inst.max_rounds),
+        auto_rounds,
         20,
         ws
     );

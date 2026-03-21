@@ -111,6 +111,7 @@ async fn run_cli(cfg: Arc<config>, args: cli_args) -> Result<(), anyhow::Error> 
         agents,
         judge,
         args.rounds.unwrap_or(cfg.max_rounds),
+        false, // auto_rounds - disabled for CLI mode
         20,
         ws
     );

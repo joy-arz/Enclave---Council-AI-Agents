@@ -22,6 +22,7 @@ pub struct orchestrator {
     pub agents: Vec<base_agent>,
     pub judge: judge_agent,
     pub max_rounds: usize,
+    pub auto_rounds: bool,  // if true, judge decides when to stop
     pub memory: Arc<Mutex<shared_memory>>,
     pub workspace_dir: PathBuf,
     pub logger: Arc<session_logger>,
@@ -33,6 +34,7 @@ impl orchestrator {
         agents: Vec<base_agent>,
         judge: judge_agent,
         max_rounds: usize,
+        auto_rounds: bool,
         memory_size: usize,
         workspace_dir: PathBuf,
     ) -> Self {
@@ -40,6 +42,7 @@ impl orchestrator {
             agents,
             judge,
             max_rounds,
+            auto_rounds,
             memory: Arc::new(Mutex::new(shared_memory::new(memory_size))),
             workspace_dir: workspace_dir.clone(),
             logger: Arc::new(session_logger::new(workspace_dir)),
@@ -108,13 +111,18 @@ impl orchestrator {
             }
         }
 
-        for round in 1..=self.max_rounds {
+        let mut round = 0;
+        let mut judge_decision = "CONTINUE".to_string();
+        let mut verdict: Option<String> = None; // will be set if judge returns early verdict
+
+        loop {
+            round += 1;
             let _ = self.logger.log(&format!("--- round {} ---", round)).await;
-            
+
             // sequential phase: the strategist always sets the baseline
             let strategist = &self.agents[0];
             let history = self.memory.lock().await.get_formatted_history();
-            
+
             let _ = self.logger.log(&format!("asking {}...", strategist.name)).await;
 
             let (strategy, terminal) = match strategist.get_response(&history).await {
@@ -128,7 +136,8 @@ impl orchestrator {
                 }
             };
 
-            // pin the first strategist response (refinement 1)            self.memory.lock().await.add_message(strategist.name.clone(), strategy.clone(), round == 1);
+            // pin the first strategist response
+            self.memory.lock().await.add_message(strategist.name.clone(), strategy.clone(), round == 1);
             if on_message(agent_response {
                 agent: strategist.name.clone(),
                 content: strategy,
@@ -139,11 +148,10 @@ impl orchestrator {
                 return Err(anyhow::anyhow!("client disconnected"));
             }
 
-            // parallel phase (refinement 2): critic, optimizer, contrarian analyze the strategy concurrently
+            // parallel phase: critic, optimizer, contrarian analyze the strategy concurrently
             let mut set = JoinSet::new();
             let history = self.memory.lock().await.get_formatted_history();
-            
-            // note: we skip the strategist (index 0) as it already spoke
+
             for agent in self.agents.iter().skip(1) {
                 let agent_arc = Arc::new(agent.clone_for_parallel());
                 let history_clone = history.clone();
@@ -163,7 +171,7 @@ impl orchestrator {
                         continue;
                     }
                 };
-                
+
                 let (content, terminal) = match res {
                     Ok(c) => {
                         let _ = self.logger.log(&format!("{} parallel response received.", name)).await;
@@ -171,11 +179,10 @@ impl orchestrator {
                     },
                     Err(e) => {
                         let _ = self.logger.log(&format!("error from {}: {}", name, e)).await;
-                        // soft fail: let the enclave continue instead of crashing the whole session
                         (format!("(failed to respond due to error: {})", e), format!("error: {}", e))
                     }
                 };
-                
+
                 self.memory.lock().await.add_message(name.clone(), content.clone(), false);
                 if on_message(agent_response {
                     agent: name,
@@ -187,19 +194,45 @@ impl orchestrator {
                     return Err(anyhow::anyhow!("client disconnected"));
                 }
             }
+
+            // check if we should continue or stop
+            if round >= self.max_rounds {
+                judge_decision = "FINISHED".to_string();
+            } else if self.auto_rounds {
+                // ask judge for decision in auto mode
+                let _ = self.logger.log("--- checking judge for auto decision ---").await;
+                let history = self.memory.lock().await.get_formatted_history();
+                let (verdict_json, _) = self.judge.get_final_verdict(&history).await?;
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&verdict_json) {
+                    if let Some(decision) = parsed.get("final_decision").and_then(|d| d.as_str()) {
+                        judge_decision = decision.to_string();
+                        verdict = Some(verdict_json);
+                        let _ = self.logger.log(&format!("judge decision: {}", judge_decision)).await;
+                    }
+                }
+                if judge_decision != "CONTINUE" {
+                    break;
+                }
+            }
         }
 
         // final judge verdict
         let history = self.memory.lock().await.get_formatted_history();
         let _ = self.logger.log("--- final verdict phase ---").await;
-        let (verdict, terminal) = self.judge.get_final_verdict(&history).await?;
+
+        let (final_verdict, terminal) = if let Some(v) = verdict {
+            (v, String::new())
+        } else {
+            self.judge.get_final_verdict(&history).await?
+        };
+
         let _ = self.logger.log("lead engineer verdict received.").await;
 
         if on_message(agent_response {
             agent: self.judge.base.name.clone(),
-            content: verdict.clone(),
+            content: final_verdict.clone(),
             terminal_output: terminal,
-            round: self.max_rounds + 1,
+            round: round + 1,
         }).await.is_err() {
             let _ = self.logger.log("client disconnected. aborting enclave.").await;
             return Err(anyhow::anyhow!("client disconnected"));
@@ -207,9 +240,9 @@ impl orchestrator {
 
         // update project state file for future sessions
         let state_path = self.get_state_path().await;
-        let _ = fs::write(state_path, &verdict).await;
+        let _ = fs::write(state_path, &final_verdict).await;
         let _ = self.logger.log("project state updated. session complete.").await;
 
-        Ok(verdict)
+        Ok(final_verdict)
     }
 }

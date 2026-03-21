@@ -4,6 +4,7 @@ const query_input = document.getElementById('query');
 const workspace_input = document.getElementById('workspace');
 const rounds_input = document.getElementById('rounds');
 const autonomous_toggle = document.getElementById('autonomous-toggle');
+const auto_rounds_toggle = document.getElementById('auto-rounds-toggle');
 const feed = document.getElementById('feed');
 const status_text = document.getElementById('status-text');
 const status_dot = document.getElementById('status-dot');
@@ -357,6 +358,7 @@ btn.addEventListener('click', () => {
 
     const workspace = workspace_input.value.trim();
     const autonomous = autonomous_toggle.checked;
+    const autoRounds = auto_rounds_toggle.checked;
     const rounds = rounds_input.value;
 
     if (workspace) {
@@ -370,15 +372,15 @@ btn.addEventListener('click', () => {
 
     btn.disabled = true;
     feed.innerHTML = '';
-    
+
     // add user message to feed
     append_message('User', query, 0);
     query_input.value = '';
-    
+
     update_status('Processing...', true);
     show_loading(true, 'Processing your request...');
 
-    start_debate(query, current_session_id, autonomous, workspace, rounds);
+    start_debate(query, current_session_id, autonomous, autoRounds, workspace, rounds);
 });
 
 query_input.addEventListener('keypress', (e) => {
@@ -405,10 +407,11 @@ function update_status(text, active = false) {
     }
 }
 
-function start_debate(query, session_id, autonomous, workspace, rounds) {
+function start_debate(query, session_id, autonomous, autoRounds, workspace, rounds) {
     let url = "/api/enclave?query=" + encodeURIComponent(query);
     if (session_id) url += "&session_id=" + session_id;
     if (autonomous) url += "&autonomous=true";
+    if (!autoRounds) url += "&auto_rounds=false";
     if (workspace) url += "&workspace_dir=" + encodeURIComponent(workspace);
     if (rounds) url += "&rounds=" + rounds;
 

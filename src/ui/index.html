@@ -1627,11 +1627,21 @@
             </div>
 
             <div class="config-group">
-                <span class="label">Rounds</span>
+                <span class="label">Auto Rounds</span>
+                <input type="checkbox" id="auto-rounds-toggle" class="hidden" checked>
+                <label for="auto-rounds-toggle" class="toggle-group">
+                    <span style="font-size: 0.85rem; font-weight: 500;">Auto</span>
+                    <div class="toggle-switch"></div>
+                </label>
+                <div class="explanation">AI decides when to stop (recommended).</div>
+            </div>
+
+            <div class="config-group">
+                <span class="label">Max Rounds</span>
                 <div class="input-wrapper">
-                    <input type="number" id="rounds" value="2" min="1" max="10" style="width: 100%;">
+                    <input type="number" id="rounds" value="5" min="1" max="20" style="width: 100%;">
                 </div>
-                <div class="explanation">Deliberation cycles per task.</div>
+                <div class="explanation">Maximum rounds when auto is enabled.</div>
             </div>
 
             <div class="agent-config">
