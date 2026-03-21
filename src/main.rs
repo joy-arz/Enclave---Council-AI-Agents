@@ -57,6 +57,8 @@ async fn run_server(cfg: Arc<config>, store: Arc<session_store>) -> Result<(), a
         .route("/api/test_cli", post(api::routes::test_cli))
         .route("/api/apply", post(api::routes::apply_change))
         .route("/api/history/:session_id", get(api::routes::get_session_history))
+        .route("/api/sessions", get(api::routes::list_sessions))
+        .route("/api/sessions/:session_id", axum::routing::delete(api::routes::delete_session))
         .nest_service("/static", ServeDir::new("src/ui"))
         .route("/", get(|| async { axum::response::Html(include_str!("ui/index.html")) }))
         .with_state((cfg.clone(), store.clone()))

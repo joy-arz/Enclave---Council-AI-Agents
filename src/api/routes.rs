@@ -229,3 +229,17 @@ pub async fn get_session_history(
 ) -> Json<Vec<agent_response>> {
     Json(session_store_inst.get_history(&session_id).await)
 }
+
+pub async fn list_sessions(
+    State((_, session_store_inst)): State<(Arc<config>, Arc<session_store>)>,
+) -> Json<Vec<crate::api::sessions_mod::SessionSummary>> {
+    Json(session_store_inst.list_sessions().await)
+}
+
+pub async fn delete_session(
+    Path(session_id): Path<String>,
+    State((_, session_store_inst)): State<(Arc<config>, Arc<session_store>)>,
+) -> Json<serde_json::Value> {
+    let deleted = session_store_inst.delete_session(&session_id).await;
+    Json(serde_json::json!({"status": if deleted { "success" } else { "error" }, "deleted": deleted}))
+}

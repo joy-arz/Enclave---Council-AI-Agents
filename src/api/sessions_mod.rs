@@ -3,6 +3,14 @@ use std::collections::HashMap;
 use crate::core::agent_response;
 use std::path::PathBuf;
 use std::fs;
+use serde::{Serialize, Deserialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SessionSummary {
+    pub session_id: String,
+    pub first_message: String,
+    pub message_count: usize,
+}
 
 #[allow(non_camel_case_types)]
 pub struct session_store {
@@ -56,5 +64,41 @@ impl session_store {
     pub async fn get_history(&self, session_id: &str) -> Vec<agent_response> {
         let sessions: tokio::sync::MutexGuard<'_, HashMap<String, Vec<agent_response>>> = self.sessions.lock().await;
         sessions.get(session_id).cloned().unwrap_or_default()
+    }
+
+    pub async fn list_sessions(&self) -> Vec<SessionSummary> {
+        let sessions: tokio::sync::MutexGuard<'_, HashMap<String, Vec<agent_response>>> = self.sessions.lock().await;
+        sessions.iter()
+            .map(|(session_id, messages)| {
+                let first_message = messages.first()
+                    .map(|m| {
+                        // Get the user query (first message with "User" agent)
+                        if m.agent == "User" {
+                            m.content.clone()
+                        } else {
+                            // If no user message found, get first message content truncated
+                            m.content.chars().take(100).collect::<String>()
+                        }
+                    })
+                    .unwrap_or_default();
+
+                SessionSummary {
+                    session_id: session_id.clone(),
+                    first_message,
+                    message_count: messages.len(),
+                }
+            })
+            .collect()
+    }
+
+    pub async fn delete_session(&self, session_id: &str) -> bool {
+        let mut sessions: tokio::sync::MutexGuard<'_, HashMap<String, Vec<agent_response>>> = self.sessions.lock().await;
+        if sessions.remove(session_id).is_some() {
+            drop(sessions);
+            self.save_to_disk().await;
+            true
+        } else {
+            false
+        }
     }
 }

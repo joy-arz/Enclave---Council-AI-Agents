@@ -128,6 +128,181 @@ if (current_session_id) {
     restore_session(current_session_id);
 }
 
+// New Session button handler
+document.getElementById('new-session-btn').addEventListener('click', () => {
+    current_session_id = null;
+    localStorage.removeItem('council_session_id');
+    feed.innerHTML = `
+        <div class="empty-state">
+            <div class="empty-state-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg></div>
+            <div class="empty-state-title">Ready to deliberate</div>
+            <div class="empty-state-text">Describe a task or workflow below to begin.<br>Press <kbd style="background: var(--surface-elevated); padding: 2px 6px; border-radius: 3px; font-size: 0.75rem;">⌘</kbd> + <kbd style="background: var(--surface-elevated); padding: 2px 6px; border-radius: 3px; font-size: 0.75rem;">Enter</kbd> to send.</div>
+        </div>
+    `;
+    update_status('System Idle', false);
+    showToast('New session started', 'info');
+});
+
+// Clear Session button handler
+document.getElementById('clear-session-btn').addEventListener('click', async () => {
+    if (!current_session_id) {
+        showToast('No active session to clear', 'warning');
+        return;
+    }
+
+    // Clear the feed but keep the session ID for continuing
+    feed.innerHTML = `
+        <div class="empty-state">
+            <div class="empty-state-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg></div>
+            <div class="empty-state-title">Session cleared</div>
+            <div class="empty-state-text">The session history has been cleared. Start a new task or continue the session below.</div>
+        </div>
+    `;
+
+    // Clear session state but keep session ID for continuation
+    update_status('Session Cleared', false);
+    showToast('Session cleared. You can continue by asking another question.', 'success');
+});
+
+// Saved Sessions button handler
+document.getElementById('saved-sessions-btn').addEventListener('click', async () => {
+    openSessionsModal();
+});
+
+function openSessionsModal() {
+    const modal = document.getElementById('saved-sessions-modal');
+    modal.classList.remove('hidden');
+    loadSessionsList();
+}
+
+function closeSessionsModal() {
+    const modal = document.getElementById('saved-sessions-modal');
+    modal.classList.add('hidden');
+}
+
+// Close modal when clicking backdrop
+document.querySelector('.modal-backdrop')?.addEventListener('click', closeSessionsModal);
+
+async function loadSessionsList() {
+    const sessionsList = document.getElementById('sessions-list');
+    sessionsList.innerHTML = '<div class="empty-state"><div class="empty-sessions-icon">⏳</div><div>Loading sessions...</div></div>';
+
+    try {
+        const response = await fetch('/api/sessions');
+        const sessions = await response.json();
+
+        if (sessions.length === 0) {
+            sessionsList.innerHTML = `
+                <div class="empty-sessions">
+                    <div class="empty-sessions-icon">📭</div>
+                    <div>No saved sessions yet</div>
+                    <div style="font-size: 0.8rem; margin-top: 8px;">Start a new session to begin.</div>
+                </div>
+            `;
+            return;
+        }
+
+        sessionsList.innerHTML = sessions.map(session => `
+            <div class="session-item" onclick="continueSession('${session.session_id}')">
+                <div class="session-item-header">
+                    <span class="session-item-id">${session.session_id.substring(0, 8)}...</span>
+                    <span class="session-item-messages">${session.message_count} messages</span>
+                </div>
+                <div class="session-item-preview">${escapeHtml(session.first_message)}</div>
+                <div class="session-item-actions">
+                    <button class="quick-action-btn" onclick="event.stopPropagation(); continueSession('${session.session_id}')">Continue</button>
+                    <button class="quick-action-btn danger" onclick="event.stopPropagation(); deleteSession('${session.session_id}')">Delete</button>
+                </div>
+            </div>
+        `).join('');
+    } catch (err) {
+        console.error("Failed to load sessions:", err);
+        sessionsList.innerHTML = `
+            <div class="empty-sessions">
+                <div class="empty-sessions-icon">❌</div>
+                <div>Failed to load sessions</div>
+            </div>
+        `;
+    }
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+async function continueSession(sessionId) {
+    current_session_id = sessionId;
+    localStorage.setItem('council_session_id', sessionId);
+    closeSessionsModal();
+
+    // Restore session from history
+    update_status('Restoring session...', true);
+    try {
+        const response = await fetch(`/api/history/${sessionId}`);
+        const history = await response.json();
+
+        if (history.length > 0) {
+            feed.innerHTML = '';
+            history.forEach(msg => {
+                append_message(msg.agent, msg.content, msg.round, msg.terminal_output);
+            });
+            update_status('System Idle', false);
+            showToast('Session restored', 'success');
+        } else {
+            feed.innerHTML = `
+                <div class="empty-state">
+                    <div class="empty-state-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg></div>
+                    <div class="empty-state-title">Session restored</div>
+                    <div class="empty-state-text">The session has been restored. Ask a follow-up question to continue.</div>
+                </div>
+            `;
+            update_status('System Idle', false);
+        }
+    } catch (err) {
+        console.error("Failed to restore session:", err);
+        update_status('System Idle', false);
+        showToast('Failed to restore session', 'error');
+    }
+}
+
+async function deleteSession(sessionId) {
+    if (!confirm('Are you sure you want to delete this session? This cannot be undone.')) {
+        return;
+    }
+
+    try {
+        const response = await fetch(`/api/sessions/${sessionId}`, {
+            method: 'DELETE'
+        });
+        const result = await response.json();
+
+        if (result.status === 'success') {
+            showToast('Session deleted', 'success');
+            loadSessionsList();
+
+            // If we deleted the current session, clear it
+            if (current_session_id === sessionId) {
+                current_session_id = null;
+                localStorage.removeItem('council_session_id');
+                feed.innerHTML = `
+                    <div class="empty-state">
+                        <div class="empty-state-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon></svg></div>
+                        <div class="empty-state-title">Ready to deliberate</div>
+                        <div class="empty-state-text">Describe a task or workflow below to begin.<br>Press <kbd style="background: var(--surface-elevated); padding: 2px 6px; border-radius: 3px; font-size: 0.75rem;">⌘</kbd> + <kbd style="background: var(--surface-elevated); padding: 2px 6px; border-radius: 3px; font-size: 0.75rem;">Enter</kbd> to send.</div>
+                    </div>
+                `;
+            }
+        } else {
+            showToast('Failed to delete session', 'error');
+        }
+    } catch (err) {
+        console.error("Failed to delete session:", err);
+        showToast('Failed to delete session', 'error');
+    }
+}
+
 browse_btn.addEventListener('click', async () => {
     try {
         const response = await fetch('/api/browse');
@@ -165,17 +340,17 @@ btn.addEventListener('click', () => {
     append_message('User', query, 0);
     query_input.value = '';
     
-    update_status('Convening...', true);
-    show_loading(true, 'The Council is convening...');
+    update_status('Processing...', true);
+    show_loading(true, 'Waiting for your request...');
 
-    start_debate(query, null, autonomous, workspace, rounds);
+    start_debate(query, current_session_id, autonomous, workspace, rounds);
 });
 
 query_input.addEventListener('keypress', (e) => {
     if (e.key === 'Enter') btn.click();
 });
 
-function show_loading(show, text = 'The Council is convening...') {
+function show_loading(show, text = 'Waiting for your request...') {
     if (show) {
         loading_indicator.classList.remove('hidden');
         loading_indicator.style.display = 'flex';
@@ -231,7 +406,7 @@ function start_debate(query, session_id, autonomous, workspace, rounds) {
         show_loading(false);
         append_message(data.agent, data.content, data.round, data.terminal_output);
         update_status(data.agent + " is speaking...", true);
-        show_loading(true, `Waiting for Council deliberation...`);
+        show_loading(true, `Waiting for response...`);
         
         if (data.agent.toLowerCase().replace(/ /g, '.') === 'lead.engineer') {
             lead_engineer_received = true;
