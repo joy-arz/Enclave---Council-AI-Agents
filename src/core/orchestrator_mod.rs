@@ -46,6 +46,32 @@ impl orchestrator {
         }
     }
 
+    pub async fn load_session_history(&self, messages: Vec<agent_response>) {
+        let mut mem = self.memory.lock().await;
+
+        // Don't clear - we want to preserve original_query if already set
+        // Only clear messages if this is the first load
+        if mem.original_query.is_empty() {
+            mem.clear();
+            // extract the original query from first user message if available
+            if let Some(first) = messages.first() {
+                if first.agent == "User" {
+                    mem.set_original_query(first.content.clone());
+                }
+            }
+        }
+
+        // load all messages into memory
+        for msg in messages {
+            // skip user messages - they're already in original_query or handled above
+            if msg.agent == "User" {
+                continue;
+            }
+            // add as non-pinned message (recent debate)
+            mem.add_message(msg.agent.clone(), msg.content.clone(), false);
+        }
+    }
+
     async fn get_state_path(&self) -> PathBuf {
         self.workspace_dir.join(".enclave_state.md")
     }
@@ -61,12 +87,20 @@ impl orchestrator {
 
         {
             let mut mem = self.memory.lock().await;
-            mem.clear();
-            mem.set_original_query(query.to_string());
+
+            // Only clear if this is a fresh session (no history loaded)
+            // If history was loaded, we preserve the original query and messages
+            if mem.original_query.is_empty() {
+                mem.clear();
+                mem.set_original_query(query.to_string());
+            } else {
+                // This is a continuation - add new query as a follow-up
+                mem.add_message("User".to_string(), query.to_string(), false);
+            }
 
             // load previous project state if it exists (refinement: project continuation)
             let state_path = self.get_state_path().await;
-            if state_path.exists() {
+            if state_path.exists() && mem.pinned_messages.is_empty() {
                 if let Ok(state_content) = fs::read_to_string(state_path).await {
                     let _ = self.logger.log("restoring project state from .enclave_state.md").await;
                     mem.add_message("system".to_string(), format!("previous project state:\n{}", state_content), true);

@@ -101,11 +101,19 @@ pub async fn handle_enclave(
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     tracing::info!("Enclave convening for query: {}", params.query);
     let (tx, rx) = mpsc::channel(100);
+    let has_session = params.session_id.is_some();
     let session_id = params.session_id.unwrap_or_else(|| Uuid::new_v4().to_string());
     let autonomous = params.autonomous.unwrap_or(config_inst.autonomous_mode);
     let ws = params.workspace_dir.map(std::path::PathBuf::from).unwrap_or_else(|| config_inst.workspace_dir.clone());
-    
+
     tracing::info!("Session ID: {}, Workspace: {:?}", session_id, ws);
+
+    // Load previous session history if session_id was provided
+    let prev_history = if has_session {
+        session_store_inst.get_history(&session_id).await
+    } else {
+        vec![]
+    };
 
     // Initialize logger for this session
     let logger = Arc::new(session_logger::new(ws.clone()));
@@ -118,11 +126,11 @@ pub async fn handle_enclave(
     let j_bin = params.judge_binary.unwrap_or_else(|| config_inst.judge_binary.clone());
 
     // setup orchestrator using local cli binaries with workspace context
-    let strategist_provider: Arc<dyn model_provider> = Arc::new(cli_provider::new(s_bin, ws.clone()).with_logger(logger.clone()));
-    let critic_provider: Arc<dyn model_provider> = Arc::new(cli_provider::new(c_bin, ws.clone()).with_logger(logger.clone()));
-    let optimizer_provider: Arc<dyn model_provider> = Arc::new(cli_provider::new(o_bin, ws.clone()).with_logger(logger.clone()));
-    let maintainer_provider: Arc<dyn model_provider> = Arc::new(cli_provider::new(ct_bin, ws.clone()).with_logger(logger.clone()));
-    let judge_provider: Arc<dyn model_provider> = Arc::new(cli_provider::new(j_bin, ws.clone()).with_logger(logger.clone()));
+    let strategist_provider: Arc<dyn model_provider> = Arc::new(cli_provider::new(s_bin, ws.clone()).with_logger(logger.clone()).with_autonomous(autonomous));
+    let critic_provider: Arc<dyn model_provider> = Arc::new(cli_provider::new(c_bin, ws.clone()).with_logger(logger.clone()).with_autonomous(autonomous));
+    let optimizer_provider: Arc<dyn model_provider> = Arc::new(cli_provider::new(o_bin, ws.clone()).with_logger(logger.clone()).with_autonomous(autonomous));
+    let maintainer_provider: Arc<dyn model_provider> = Arc::new(cli_provider::new(ct_bin, ws.clone()).with_logger(logger.clone()).with_autonomous(autonomous));
+    let judge_provider: Arc<dyn model_provider> = Arc::new(cli_provider::new(j_bin, ws.clone()).with_logger(logger.clone()).with_autonomous(autonomous));
 
     let mut agents = vec![
         roles::strategist(strategist_provider, "cli", config_inst.default_temperature, config_inst.max_tokens_per_agent),
@@ -151,12 +159,29 @@ pub async fn handle_enclave(
     let query = params.query;
     let store_clone = session_store_inst.clone();
     let sid_clone = session_id.clone();
-    
+
     tokio::spawn(async move {
         // send session id as first message
         let _ = tx.send(Event::default().event("session_info").data(serde_json::json!({"session_id": sid_clone}).to_string())).await;
 
+        // restore session history if available
+        if !prev_history.is_empty() {
+            let history_preview: Vec<String> = prev_history.iter().map(|m| format!("[{}]: {}", m.agent, &m.content[..m.content.len().min(50)])).collect();
+            tracing::info!("Loading {} messages into session: {:?}", prev_history.len(), history_preview);
+            orchestrator_inst.load_session_history(prev_history).await;
+        }
+
         let logger_err = logger.clone();
+
+        // store user query in session
+        let user_query_response = agent_response {
+            agent: "User".to_string(),
+            content: query.clone(),
+            terminal_output: String::new(),
+            round: 0,
+        };
+        store_clone.add_message(&session_id, user_query_response).await;
+
         let _ = orchestrator_inst.run_council(&query, |resp| {
             let tx_clone = tx.clone();
             let store = store_clone.clone();
