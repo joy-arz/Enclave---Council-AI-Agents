@@ -2,6 +2,7 @@
 /development_docs
 .env
 .council_history.json
+.enclave_history.json
 .council_state.md
 last_session_log.md
 **/*.rs.bk

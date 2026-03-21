@@ -1,10 +1,14 @@
 # Enclave (Rust)
 
-A high-performance, multi-agent AI engineering system built with Rust. This system orchestrates local CLI agents (like `gemini-cli` or `qwen-cli`) to collaborate as active engineering partners, directly modifying the project's codebase until tasks are complete.
+A high-performance, multi-agent AI engineering system built with Rust. This system orchestrates local CLI agents (like `gemini` or `qwen`) to collaborate as active engineering partners, directly modifying the project's codebase until tasks are complete.
 
 > **note:** This project is inspired by pewdiepie's local council AI, and even though this may not be as good as his, it aims to provide a powerful local multi-agent experience.
 
 > **⚠️ Demo Notice:** This project is still a work in progress/demo. Some features may not work as intended or might be incomplete. If you encounter any issues or have suggestions, please reach out!
+
+![Enclave Dashboard](readme_img/Main.png)
+
+![Enclave Session](readme_img/Main-2.png)
 
 ---
 
@@ -78,7 +82,7 @@ Sessions are automatically persisted to `.enclave_history.json` in your workspac
 ### Prerequisites
 
 - **Rust**: Install via [rustup](https://rustup.rs/)
-- **CLI Agents**: Ensure you have agents like `gemini-cli` or `qwen-cli` installed and accessible in your path
+- **CLI Agents**: Ensure you have agents like `gemini` or `qwen` installed and accessible in your path
 - **Workspace**: A project directory where Enclave will operate
 
 ### Configuration
@@ -93,11 +97,11 @@ Open `.env` and configure:
 
 ```env
 # CLI binary mapping - map each role to your preferred CLI agent
-STRATEGIST_BINARY=gemini-cli      # Architect agent
-CRITIC_BINARY=qwen-cli            # Reviewer agent
-OPTIMIZER_BINARY=gemini-cli       # Refactorer agent
-CONTRARIAN_BINARY=qwen-cli        # Maintainer agent
-JUDGE_BINARY=gemini-cli           # Lead Engineer agent
+STRATEGIST_BINARY=gemini      # Architect agent
+CRITIC_BINARY=qwen            # Reviewer agent
+OPTIMIZER_BINARY=gemini       # Refactorer agent
+CONTRARIAN_BINARY=qwen        # Maintainer agent
+JUDGE_BINARY=gemini           # Lead Engineer agent
 
 # Optional defaults
 WORKSPACE_DIR=/absolute/path/to/project
