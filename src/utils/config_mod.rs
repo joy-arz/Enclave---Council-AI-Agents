@@ -35,7 +35,7 @@ pub struct config {
     pub judge_binary: String,
 
     // autonomous mode configuration
-    #[serde(default = "default_false")]
+    #[serde(default = "default_true")]
     pub autonomous_mode: bool,
 
     // session defaults
@@ -53,7 +53,7 @@ fn default_host() -> String { "127.0.0.1".to_string() }
 fn default_max_rounds() -> usize { 3 }
 fn default_max_tokens() -> u32 { 500 }
 fn default_temperature() -> f32 { 0.7 }
-fn default_false() -> bool { false }
+fn default_true() -> bool { true }
 fn default_gemini_binary() -> String { "gemini-cli".to_string() }
 fn default_qwen_binary() -> String { "qwen-cli".to_string() }
 fn default_workspace() -> PathBuf { std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")) }

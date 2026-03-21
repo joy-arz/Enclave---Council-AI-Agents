@@ -53,6 +53,9 @@ const loading_text = document.getElementById('loading-text');
 
 let current_session_id = localStorage.getItem('council_session_id');
 let last_workspace = localStorage.getItem('council_workspace');
+let last_message_time = null;
+let silence_check_interval = null;
+let is_session_active = false;
 
 if (last_workspace) {
     workspace_input.value = last_workspace;
@@ -267,6 +270,38 @@ async function continueSession(sessionId) {
     }
 }
 
+function check_silence() {
+    if (!is_session_active || !last_message_time) return;
+
+    const elapsed = Date.now() - last_message_time;
+    const minutes = Math.floor(elapsed / 60000);
+
+    if (elapsed > 60000) { // After 1 minute of silence
+        if (minutes >= 60) {
+            update_status(`Silent for ${Math.floor(minutes / 60)}h ${minutes % 60}m...`, true);
+        } else {
+            update_status(`Silent for ${minutes}m...`, true);
+        }
+    }
+
+    if (elapsed > 300000) { // After 5 minutes, show warning
+        showToast('Council seems stuck. May have failed silently.', 'warning', 8000);
+    }
+}
+
+function format_time(date) {
+    const now = new Date();
+    const diff = now - date;
+    const seconds = Math.floor(diff / 1000);
+    const minutes = Math.floor(seconds / 60);
+    const hours = Math.floor(minutes / 60);
+
+    if (seconds < 60) return 'just now';
+    if (minutes < 60) return `${minutes}m ago`;
+    if (hours < 24) return `${hours}h ago`;
+    return date.toLocaleDateString();
+}
+
 async function deleteSession(sessionId) {
     if (!confirm('Are you sure you want to delete this session? This cannot be undone.')) {
         return;
@@ -341,7 +376,7 @@ btn.addEventListener('click', () => {
     query_input.value = '';
     
     update_status('Processing...', true);
-    show_loading(true, 'Waiting for your request...');
+    show_loading(true, 'Processing your request...');
 
     start_debate(query, current_session_id, autonomous, workspace, rounds);
 });
@@ -400,14 +435,23 @@ function start_debate(query, session_id, autonomous, workspace, rounds) {
     });
 
     let lead_engineer_received = false;
+    is_session_active = true;
+    last_message_time = Date.now();
+
+    // Start silence detection
+    if (silence_check_interval) clearInterval(silence_check_interval);
+    silence_check_interval = setInterval(() => {
+        check_silence();
+    }, 15000); // Check every 15 seconds
 
     event_source.onmessage = (event) => {
         const data = JSON.parse(event.data);
+        last_message_time = Date.now();
         show_loading(false);
         append_message(data.agent, data.content, data.round, data.terminal_output);
         update_status(data.agent + " is speaking...", true);
         show_loading(true, `Waiting for response...`);
-        
+
         if (data.agent.toLowerCase().replace(/ /g, '.') === 'lead.engineer') {
             lead_engineer_received = true;
         }
@@ -417,8 +461,13 @@ function start_debate(query, session_id, autonomous, workspace, rounds) {
         console.log("SSE Connection closed.");
         event_source.close();
         btn.disabled = false;
-        show_loading(false);
-        
+        is_session_active = false;
+        if (silence_check_interval) {
+            clearInterval(silence_check_interval);
+            silence_check_interval = null;
+        }
+        show_loading(true, 'Waiting for your request...');
+
         if (lead_engineer_received) {
             update_status('Council Adjourned', false);
             // Optionally add a small notification card
@@ -480,8 +529,13 @@ function append_message(agent, content, round, terminal_output = "") {
     round_tag.className = 'round-tag';
     round_tag.textContent = round === 0 ? "Initial" : "Round " + round;
 
+    const time_tag = document.createElement('span');
+    time_tag.className = 'time-tag';
+    time_tag.textContent = format_time(new Date());
+
     header.appendChild(agent_info);
     header.appendChild(round_tag);
+    header.appendChild(time_tag);
 
     const body = document.createElement('div');
     body.className = 'card-content';
