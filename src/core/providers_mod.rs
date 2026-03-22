@@ -139,99 +139,25 @@ impl model_provider for cli_provider {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
         if output.status.success() {
-            // Extract clean dialogue for user-facing output
-            // and thinking/process logs for terminal display
-            let lines: Vec<&str> = stdout.lines().collect();
-            let debug_markers = [
-                "Debug mode enabled",
-                "Logging to:",
-                "Warning:",
-                "Tool \"write_file\" requires user approval",
-                "To enable automatic tool execution",
-                "Example:",
-                "<thinking>",
-                "</thinking>",
-            ];
+            // simple heuristic to clean output (removing common CLI debug noise)
+            // preserves natural line breaks and formatting
+            let cleaned = if stdout.contains("```") {
+                stdout.trim().to_string()
+            } else {
+                stdout.split("\n\n")
+                    .max_by_key(|s| s.len())
+                    .unwrap_or(&stdout)
+                    .trim()
+                    .to_string()
+            };
 
-            // For user dialogue: extract clean response (last substantial content block)
-            let mut cleaned_lines: Vec<&str> = Vec::new();
-            let mut found_real_content = false;
-
-            for line in lines.iter().rev() {
-                let trimmed = line.trim();
-
-                // skip empty lines at the end
-                if trimmed.is_empty() && !found_real_content {
-                    continue;
-                }
-
-                // skip debug markers
-                let is_debug = debug_markers.iter().any(|m| trimmed.starts_with(m));
-                if is_debug {
-                    continue;
-                }
-
-                // skip lines that are just code fences
-                if trimmed == "```" || trimmed == "```json" || trimmed == "```rust" || trimmed == "```" {
-                    continue;
-                }
-
-                found_real_content = true;
-                cleaned_lines.push(line);
-            }
-
-            // reverse back to correct order and join
-            cleaned_lines.reverse();
-            let cleaned = cleaned_lines.join("\n").trim().to_string();
-
-            // For terminal logs: extract thinking, debug info, and process logs
-            // Skip the actual dialogue content (too verbose for logs)
-            let mut thinking_logs: Vec<&str> = Vec::new();
-            let mut in_thinking = false;
-
-            for line in &lines {
-                let trimmed = line.trim();
-
-                // detect thinking blocks
-                if trimmed.starts_with("<thinking>") {
-                    in_thinking = true;
-                    thinking_logs.push(line);
-                    continue;
-                }
-                if trimmed.starts_with("</thinking>") {
-                    in_thinking = false;
-                    thinking_logs.push(line);
-                    continue;
-                }
-
-                // include thinking block content
-                if in_thinking {
-                    thinking_logs.push(line);
-                    continue;
-                }
-
-                // include debug markers and warnings in logs
-                let is_debug = debug_markers.iter().any(|m| trimmed.starts_with(m));
-                if is_debug || trimmed.starts_with("Logging to:") || trimmed.contains("Tool \"write_file\"") {
-                    thinking_logs.push(line);
-                    continue;
-                }
-
-                // skip verbose dialogue lines (we'll show dialogue in main chat)
-                if !trimmed.is_empty() && !is_debug {
-                    // include summary markers and key process indicators
-                    if trimmed.contains('=') || trimmed.contains("---") || trimmed.starts_with('#') {
-                        thinking_logs.push(line);
-                    }
-                }
-            }
-
-            let thinking_output = thinking_logs.join("\n");
+            // full terminal output for logs (filter out massive prompts only)
+            let full_terminal = format!("{}\n\n[... CLI OUTPUT ...]\n\n{}", stdout, stderr);
 
             if let Some(ref l) = self.logger {
                 let _ = l.log("cli execution successful.").await;
             }
-            Ok((cleaned, thinking_output))
+            Ok((cleaned, full_terminal))
         } else {
             let error_msg = stderr.trim().to_string();
             if let Some(ref l) = self.logger {

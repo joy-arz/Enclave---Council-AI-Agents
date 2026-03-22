@@ -553,24 +553,24 @@ function append_message(agent, content, round, terminal_output = "") {
                 <div class="verdict-grid">
                     <div class="verdict-item full-width">
                         <span class="verdict-label">Summary</span>
-                        <div>${json.summary}</div>
+                        <div>${json.summary || 'N/A'}</div>
                     </div>
                     <div class="verdict-item">
                         <span class="verdict-label">Status</span>
-                        <div style="color: ${status_color}; font-weight: 700; font-family: 'Fira Code';">${json.final_decision}</div>
+                        <div style="color: ${status_color}; font-weight: 700; font-family: 'Fira Code';">${json.final_decision || 'UNKNOWN'}</div>
                     </div>
                     <div class="verdict-item">
                         <span class="verdict-label">Best Answer</span>
-                        <div style="font-size: 0.8rem; opacity: 0.8;">${json.best_answer}</div>
+                        <div style="font-size: 0.8rem; opacity: 0.8;">${json.best_answer || 'N/A'}</div>
                     </div>
                     <div class="verdict-item full-width">
                         <span class="verdict-label">Reasoning</span>
-                        <div style="font-style: italic; font-size: 0.85rem; color: var(--text-muted);">${json.reasoning}</div>
+                        <div style="font-style: italic; font-size: 0.85rem; color: var(--text-muted);">${json.reasoning || 'N/A'}</div>
                     </div>
                     <div class="verdict-item full-width">
                         <span class="verdict-label">Key Disagreements</span>
                         <ul style="margin: 0; padding-left: 18px; color: var(--text-muted); font-size: 0.85rem;">
-                            ${json.key_disagreements.map(d => `<li>${d}</li>`).join('')}
+                            ${(json.key_disagreements || []).map(d => `<li>${d}</li>`).join('')}
                         </ul>
                     </div>
                 </div>
