@@ -290,6 +290,12 @@ function check_silence() {
     }
 }
 
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
 function format_time(date) {
     const now = new Date();
     const diff = now - date;
@@ -576,7 +582,7 @@ function append_message(agent, content, round, terminal_output = "") {
                 </div>
             `;
         } else if (agent_lower === 'user') {
-            body.textContent = content;
+            body.innerHTML = escapeHtml(content).replace(/\n/g, '<br>');
         } else {
             // Parse proposals in non-autonomous mode
             const proposals = parse_proposals(content);
@@ -585,16 +591,16 @@ function append_message(agent, content, round, terminal_output = "") {
                 proposals.forEach(p => {
                     clean_content = clean_content.replace(p.raw, "");
                 });
-                
-                body.textContent = clean_content.trim();
-                
+
+                body.innerHTML = escapeHtml(clean_content.trim()).replace(/\n/g, '<br>');
+
                 proposals.forEach(p => {
                     const prop_div = document.createElement('div');
                     prop_div.className = 'proposal-box';
 
                     const prop_header = document.createElement('div');
                     prop_header.className = 'proposal-header';
-                    prop_header.innerHTML = `<span><strong>PROPOSAL:</strong> ${p.path}</span>`;
+                    prop_header.innerHTML = `<span><strong>PROPOSAL:</strong> ${escapeHtml(p.path)}</span>`;
 
                     const apply_btn = document.createElement('button');
                     apply_btn.textContent = "Apply Change";
@@ -613,11 +619,11 @@ function append_message(agent, content, round, terminal_output = "") {
                     body.appendChild(prop_div);
                 });
             } else {
-                body.textContent = content;
+                body.innerHTML = escapeHtml(content).replace(/\n/g, '<br>');
             }
         }
     } catch (e) {
-        body.textContent = content;
+        body.innerHTML = escapeHtml(content).replace(/\n/g, '<br>');
     }
 
     // Add terminal output if present (collapsible)

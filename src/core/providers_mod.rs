@@ -139,20 +139,11 @@ impl model_provider for cli_provider {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
         if output.status.success() {
-            // simple heuristic to clean output (removing common CLI debug noise)
-            // preserves natural line breaks and formatting
-            let cleaned = if stdout.contains("```") {
-                stdout.trim().to_string()
-            } else {
-                stdout.split("\n\n")
-                    .max_by_key(|s| s.len())
-                    .unwrap_or(&stdout)
-                    .trim()
-                    .to_string()
-            };
+            // Clean output: trim whitespace, preserve natural line breaks
+            let cleaned = stdout.trim().to_string();
 
-            // full terminal output for logs (filter out massive prompts only)
-            let full_terminal = format!("{}\n\n[... CLI OUTPUT ...]\n\n{}", stdout, stderr);
+            // Full terminal output for logs
+            let full_terminal = format!("=== STDOUT ===\n{}\n\n=== STDERR ===\n{}", stdout.trim(), stderr.trim());
 
             if let Some(ref l) = self.logger {
                 let _ = l.log("cli execution successful.").await;
