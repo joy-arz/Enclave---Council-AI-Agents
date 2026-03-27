@@ -236,7 +236,9 @@ impl model_provider for openai_provider {
     }
 }
 
-/// MiniMax API provider (default provider for nca)
+/// MiniMax API provider using Anthropic-compatible endpoint
+/// Endpoint: /v1/messages (Anthropic format)
+/// Base URL: https://api.minimax.io/anthropic
 #[allow(dead_code)]
 #[allow(non_camel_case_types)]
 pub struct minimax_provider {
@@ -249,8 +251,23 @@ pub struct minimax_provider {
 #[allow(dead_code)]
 impl minimax_provider {
     pub fn new(api_key: String, model: String, base_url: String) -> Self {
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(
+            "Authorization",
+            format!("Bearer {}", api_key).parse().unwrap(),
+        );
+        headers.insert(
+            "x-api-key",
+            api_key.parse().unwrap(),
+        );
+        headers.insert(
+            "anthropic-version",
+            "2023-06-01".parse().unwrap(),
+        );
+
         Self {
             client: Client::builder()
+                .default_headers(headers)
                 .timeout(std::time::Duration::from_secs(120))
                 .build()
                 .expect("failed to create HTTP client"),
@@ -259,6 +276,87 @@ impl minimax_provider {
             base_url,
         }
     }
+
+    fn endpoint(&self) -> String {
+        format!("{}/v1/messages", self.base_url.trim_end_matches('/'))
+    }
+}
+
+/// Extract text content from MiniMax response, handling thinking/tool_use blocks
+/// MiniMax M2.5/M2.7 returns extended thinking - the thinking content IS the actual response
+fn extract_minimax_text(data: &serde_json::Value) -> Result<String, anyhow::Error> {
+    // Try to get text directly if it's a string
+    if let Some(text) = data["content"].as_str() {
+        return Ok(text.to_string());
+    }
+
+    // Otherwise, parse as array of blocks
+    let content = data["content"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("minimax response: content is not an array or string"))?;
+
+    // For MiniMax models, the thinking block contains the actual response
+    // text blocks come after thinking and may be empty or supplementary
+    // tool_use blocks are internal - skip them
+    let mut thinking_content = Vec::new();
+    let mut text_content = Vec::new();
+
+    for block in content {
+        let block_type = block["type"].as_str().unwrap_or("");
+
+        match block_type {
+            "thinking" => {
+                // Thinking content is the main response for MiniMax
+                if let Some(thinking) = block["thinking"].as_str() {
+                    let trimmed = thinking.trim();
+                    if !trimmed.is_empty() {
+                        thinking_content.push(trimmed.to_string());
+                    }
+                }
+            }
+            "text" => {
+                if let Some(text) = block["text"].as_str() {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        text_content.push(trimmed.to_string());
+                    }
+                }
+            }
+            "tool_use" | "tool_result" | "tool_use_block" => {
+                // Skip tool-related blocks
+            }
+            _ => {
+                // Try to extract any text content
+                for key in &["text", "content", "thinking"] {
+                    if let Some(text) = block[key].as_str() {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() {
+                            text_content.push(trimmed.to_string());
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Prefer thinking content (MiniMax's actual response), fallback to text
+    let final_text = if !thinking_content.is_empty() {
+        thinking_content.join("\n")
+    } else if !text_content.is_empty() {
+        text_content.join("\n")
+    } else {
+        // Fallback: check if there's any text field at all
+        if let Some(text) = data["text"].as_str() {
+            text.to_string()
+        } else {
+            let debug_info = serde_json::to_string_pretty(data).unwrap_or_default();
+            tracing::warn!("minimax response: no text extracted, full response: {}", debug_info);
+            return Err(anyhow::anyhow!("minimax response: no text content found"));
+        }
+    };
+
+    Ok(final_text)
 }
 
 #[async_trait]
@@ -272,36 +370,59 @@ impl model_provider for minimax_provider {
         temperature: f32,
         max_tokens: u32,
     ) -> Result<(String, String), anyhow::Error> {
-        // MiniMax uses a different API format
-        let url = format!("{}/v1/text/chatcompletion_v2", self.base_url);
+        let model = if self.model.is_empty() {
+            "MiniMax-M2.5".to_string()
+        } else {
+            self.model.clone()
+        };
+
+        // Build messages array (Anthropic format)
+        let mut messages = Vec::new();
+        if let Some(sys) = system_prompt {
+            if !sys.is_empty() {
+                messages.push(serde_json::json!({
+                    "role": "user",
+                    "content": sys
+                }));
+            }
+        }
+        messages.push(serde_json::json!({
+            "role": "user",
+            "content": prompt
+        }));
 
         let body = serde_json::json!({
-            "model": self.model,
-            "messages": {
-                "role": "system",
-                "content": system_prompt.unwrap_or("")
-            },
-            "tokens_per_message": 128,
-            "sample_count": 1,
+            "model": model,
+            "messages": messages,
             "max_tokens": max_tokens,
-            "temperature": temperature,
-            "prompt": prompt
+            "temperature": temperature
         });
 
-        let res = self.client.post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .header("Content-Type", "application/json")
+        // Debug: log the request
+        tracing::debug!("minimax request to {}: {}", self.endpoint(), serde_json::to_string(&body).unwrap_or_default());
+
+        let res = self.client
+            .post(self.endpoint())
             .json(&body)
             .send()
             .await?;
 
-        let data: serde_json::Value = res.json().await?;
+        let status = res.status();
+        let body_text = res.text().await.unwrap_or_default();
+        tracing::debug!("minimax response status: {}, body: {}", status, body_text);
 
-        // MiniMax response format: choices[0].text
-        let content = data["choices"][0]["text"]
-            .as_str()
-            .ok_or_else(|| anyhow::anyhow!("minimax response: text is missing or not a string"))?
-            .to_string();
+        if !status.is_success() {
+            return Err(anyhow::anyhow!("minimax API error {}: {}", status, body_text));
+        }
+
+        let data: serde_json::Value = serde_json::from_str(&body_text)?;
+
+        // Debug: log the full response
+        tracing::debug!("minimax response: {}", serde_json::to_string(&data).unwrap_or_default());
+
+        // MiniMax can return different content types: text, thinking, tool_use
+        // We need to extract text content, handling thinking blocks
+        let content = extract_minimax_text(&data)?;
 
         Ok((content.clone(), content))
     }
@@ -512,8 +633,8 @@ pub mod factory {
             }
             ProviderType::MiniMax => {
                 if let Some(key) = api_key {
-                    let model = model.unwrap_or_else(|| "MiniMax-Text-01".to_string());
-                    let base_url = base_url.unwrap_or_else(|| "https://api.minimax.io/v1".to_string());
+                    let model = model.unwrap_or_else(|| "MiniMax-M2.5".to_string());
+                    let base_url = base_url.unwrap_or_else(|| "https://api.minimax.io/anthropic".to_string());
                     Arc::new(minimax_provider::new(key, model, base_url))
                 } else {
                     tracing::warn!("MiniMax provider requested but no API key provided, falling back to CLI");

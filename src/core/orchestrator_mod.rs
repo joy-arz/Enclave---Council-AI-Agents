@@ -88,6 +88,15 @@ impl orchestrator {
         let _ = self.logger.clear().await;
         let _ = self.logger.log_session_start(query).await;
 
+        // load previous project state if it exists (refinement: project continuation)
+        // Read file before acquiring lock to minimize lock duration
+        let state_path = self.get_state_path().await;
+        let state_content = if state_path.exists() {
+            fs::read_to_string(state_path).await.ok()
+        } else {
+            None
+        };
+
         {
             let mut mem = self.memory.lock().await;
 
@@ -100,15 +109,6 @@ impl orchestrator {
                 // This is a continuation - add new query as a follow-up
                 mem.add_message("User".to_string(), query.to_string(), false);
             }
-
-            // load previous project state if it exists (refinement: project continuation)
-            // Read file before acquiring lock to minimize lock duration
-            let state_path = self.get_state_path().await;
-            let state_content = if state_path.exists() {
-                fs::read_to_string(state_path).await.ok()
-            } else {
-                None
-            };
 
             // Now acquire lock only for the in-memory operation
             if let Some(content) = state_content {
@@ -132,7 +132,7 @@ impl orchestrator {
 
             let _ = self.logger.log(&format!("asking {}...", strategist.name)).await;
 
-            let (strategy, terminal) = match strategist.get_response(&history).await {
+            let (strategy, terminal) = match strategist.get_response_with_tools(&history).await {
                 Ok((s, t)) => {
                     let _ = self.logger.log(&format!("{} response received.", strategist.name)).await;
                     (s, t)
@@ -145,6 +145,10 @@ impl orchestrator {
 
             // pin the first strategist response
             self.memory.lock().await.add_message(strategist.name.clone(), strategy.clone(), round == 1);
+
+            // Log the architect's chat response for web UI display
+            let _ = self.logger.log_agent_message(&strategist.name, round, &strategy).await;
+
             if on_message(agent_response {
                 agent: strategist.name.clone(),
                 content: strategy,
@@ -165,7 +169,7 @@ impl orchestrator {
                 let logger_arc = self.logger.clone();
                 set.spawn(async move {
                     let _ = logger_arc.log(&format!("asking {} in parallel...", agent_arc.name)).await;
-                    let res = agent_arc.get_response(&history_clone).await;
+                    let res = agent_arc.get_response_with_tools(&history_clone).await;
                     (agent_arc.name.clone(), res)
                 });
             }
@@ -182,6 +186,8 @@ impl orchestrator {
                 let (content, terminal) = match res {
                     Ok(c) => {
                         let _ = self.logger.log(&format!("{} parallel response received.", name)).await;
+                        // Log agent chat response for web UI display
+                        let _ = self.logger.log_agent_message(&name, round, &c.0).await;
                         c
                     },
                     Err(e) => {

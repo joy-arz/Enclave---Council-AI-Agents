@@ -15,7 +15,6 @@ use crate::core::{orchestrator, agent_response};
 
 use crate::utils::config_mod::config;
 use crate::agents::{roles, judge::judge_agent};
-use crate::core::providers_mod::{cli_provider, model_provider};
 use crate::core::providers_mod::factory;
 use crate::core::WorktreeManager;
 use crate::api::sessions_mod::session_store;
@@ -90,8 +89,17 @@ pub async fn test_cli(
     Json(params): Json<test_cli_params>,
 ) -> Json<serde_json::Value> {
     let ws = params.workspace_dir.map(std::path::PathBuf::from).unwrap_or_else(|| config_inst.workspace_dir.clone());
-    let provider = cli_provider::new(params.command, ws);
-    
+
+    // Use factory to create provider (CLI or API based on command name)
+    let provider = factory::create_provider(
+        &params.command,
+        ws,
+        config_inst.minimax_api_key.clone(),
+        Some(config_inst.minimax_model.clone()),
+        Some(config_inst.minimax_base_url.clone()),
+        false, // not autonomous for test
+    );
+
     match provider.call_model("test", "ping", Some("respond with 'pong' if you are working"), 0.7, 10).await {
         Ok(_) => Json(serde_json::json!({"status": "success"})),
         Err(e) => Json(serde_json::json!({"status": "error", "message": e.to_string()})),
@@ -156,46 +164,23 @@ pub async fn handle_enclave(
     let j_bin = params.judge_binary.unwrap_or_else(|| config_inst.judge_binary.clone());
 
     // Create providers using factory - supports CLI, OpenAI, Anthropic, MiniMax, OpenRouter
-    let strategist_provider = factory::create_provider(
-        &s_bin,
-        ws.clone(),
-        config_inst.minimax_api_key.clone(),
-        Some(config_inst.minimax_model.clone()),
-        Some(config_inst.minimax_base_url.clone()),
-        autonomous,
-    );
-    let critic_provider = factory::create_provider(
-        &c_bin,
-        ws.clone(),
-        config_inst.openai_api_key.clone(),
-        None,
-        None,
-        autonomous,
-    );
-    let optimizer_provider = factory::create_provider(
-        &o_bin,
-        ws.clone(),
-        config_inst.openai_api_key.clone(),
-        None,
-        None,
-        autonomous,
-    );
-    let maintainer_provider = factory::create_provider(
-        &ct_bin,
-        ws.clone(),
-        config_inst.anthropic_api_key.clone(),
-        None,
-        None,
-        autonomous,
-    );
-    let judge_provider = factory::create_provider(
-        &j_bin,
-        ws.clone(),
-        config_inst.openrouter_api_key.clone(),
-        Some(config_inst.openrouter_model.clone()),
-        Some(config_inst.openrouter_base_url.clone()),
-        autonomous,
-    );
+    // For API providers, we need to pass the right API key based on what was selected
+    let create_prov = |bin: &str| {
+        factory::create_provider(
+            bin,
+            ws.clone(),
+            config_inst.minimax_api_key.clone(),
+            Some(config_inst.minimax_model.clone()),
+            Some(config_inst.minimax_base_url.clone()),
+            autonomous,
+        )
+    };
+
+    let strategist_provider = create_prov(&s_bin);
+    let critic_provider = create_prov(&c_bin);
+    let optimizer_provider = create_prov(&o_bin);
+    let maintainer_provider = create_prov(&ct_bin);
+    let judge_provider = create_prov(&j_bin);
 
     let mut agents = vec![
         roles::strategist(strategist_provider, "cli", config_inst.default_temperature, config_inst.max_tokens_per_agent),

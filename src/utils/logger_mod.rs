@@ -14,8 +14,7 @@ pub enum LogEvent {
     round_start { round: usize },
     #[allow(dead_code)]
     round_end { round: usize },
-    #[allow(dead_code)]
-    agent_message { timestamp: String, agent: String, round: usize },
+    agent_message { timestamp: String, agent: String, round: usize, content: String },
     judge_decision { timestamp: String, decision: String, round: usize },
     max_rounds_reached { max_rounds: usize },
     #[allow(dead_code)]
@@ -92,7 +91,7 @@ impl session_logger {
         };
 
         file.write_all(entry.as_bytes()).await?;
-        let _ = file.flush().await;
+        file.sync_all().await.map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
 
         Ok(())
     }
@@ -129,15 +128,17 @@ impl session_logger {
         self.log(&format!("--- round {} ---", round)).await
     }
 
-    /// Log agent message
-    #[allow(dead_code)]
-    pub async fn log_agent_message(&self, agent: &str, round: usize) -> tokio::io::Result<()> {
+    /// Log agent message (for web UI display)
+    pub async fn log_agent_message(&self, agent: &str, round: usize, content: &str) -> tokio::io::Result<()> {
         let timestamp = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
         self.log_event(LogEvent::agent_message {
             timestamp,
             agent: agent.to_string(),
             round,
-        }).await
+            content: content.to_string(),
+        }).await?;
+        // Also log to markdown for human readability
+        self.log_markdown(&format!("\n### {} (round {})\n\n{}\n", agent, round, content)).await
     }
 
     /// Log judge decision

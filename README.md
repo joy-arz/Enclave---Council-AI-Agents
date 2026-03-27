@@ -99,33 +99,29 @@ CLI agents run locally and can accept prompts via stdin. Autonomous mode flags a
 |-----------|-----------------|-------|
 | **Qwen** (`qwen`) | `-y` | Use `qwen -y` or `--approval-mode yolo` |
 | **Gemini** (`gemini`) | `-y` | Google Gemini CLI |
-| **Codex** (`codex`) | `--full-auto` | OpenAI's Codex CLI |
-| **Claude Code** (`claude`) | `--dangerously-skip-permissions` | Anthropic's Claude CLI |
-| **OpenCode** (`opencode`) | `-y` | Supports `-y` or `--dangerously-skip-permissions` |
 
-#### API Providers
+#### API Providers (Default: MiniMax)
 
-API providers require an API key but offer faster execution without local setup:
+**MiniMax** is the default provider. It uses the Anthropic-compatible endpoint and supports the M2.5/M2.7 models.
 
-| API Provider | Model | Notes |
-|--------------|-------|-------|
-| **MiniMax** (`minimax`) | MiniMax-Text-01 | Requires `MINIMAX_API_KEY` |
-| **OpenAI** (`openai`) | GPT-4o | Requires `OPENAI_API_KEY` |
-| **Anthropic** (`anthropic`) | Claude 3.5 Sonnet | Requires `ANTHROPIC_API_KEY` |
-| **OpenRouter** (`openrouter`) | Mixed models | Requires `OPENROUTER_API_KEY` |
+| API Provider | Model | Endpoint | Notes |
+|--------------|-------|---------|-------|
+| **MiniMax** (`minimax`) | MiniMax-M2.5 | Anthropic-compatible (`/v1/messages`) | Requires `MINIMAX_API_KEY` |
+
+**MiniMax Setup:**
+1. Get your API key from [platform.minimax.io](https://platform.minimax.io)
+2. Subscribe to the Token Plan for access to M2.5/M2.7 models
+3. Set `MINIMAX_API_KEY` in your `.env`
 
 **How it works:** When autonomous mode is enabled, Enclave automatically detects the CLI agent and appends the appropriate flag to enable auto-approval of file edits and shell commands.
 
-**Examples:**
+**CLI Examples:**
 ```bash
-# CLI - YOLO mode
+# Qwen - YOLO mode
 qwen -y "fix the bug"
 
-# CLI - Full auto
-codex --full-auto "implement feature"
-
-# CLI - Skip permissions
-claude --dangerously-skip-permissions "analyze code"
+# Gemini - YOLO mode
+gemini -y "refactor this"
 ```
 
 ### Configuration
@@ -139,20 +135,17 @@ cp .env.example .env
 Open `.env` and configure:
 
 ```env
-# CLI binary mapping - map each role to your preferred CLI agent
-# Supported agents: qwen, gemini, codex, claude, opencode
-# Or use "openai", "anthropic", "minimax", "openrouter" for API-based providers
-STRATEGIST_BINARY=gemini
-CRITIC_BINARY=qwen
-OPTIMIZER_BINARY=gemini
-CONTRARIAN_BINARY=qwen
-JUDGE_BINARY=gemini
+# Provider Selection - CLI: gemini, qwen | API: minimax (default)
+STRATEGIST_BINARY=minimax
+CRITIC_BINARY=minimax
+OPTIMIZER_BINARY=minimax
+CONTRARIAN_BINARY=minimax
+JUDGE_BINARY=minimax
 
-# API Keys (optional - CLI binaries are used by default)
-MINIMAX_API_KEY=
-OPENAI_API_KEY=
-ANTHROPIC_API_KEY=
-OPENROUTER_API_KEY=
+# MiniMax API (Anthropic-compatible endpoint)
+MINIMAX_API_KEY=your_key_here
+MINIMAX_MODEL=MiniMax-M2.5
+MINIMAX_BASE_URL=https://api.minimax.io/anthropic
 
 # Session defaults
 MAX_ROUNDS=7
@@ -160,7 +153,7 @@ MAX_TOKENS_PER_AGENT=1000
 DEFAULT_TEMPERATURE=0.7
 HOST=127.0.0.1
 PORT=8000
-AUTONOMOUS_MODE=false
+AUTONOMOUS_MODE=true
 ```
 
 ### Building
@@ -193,7 +186,7 @@ Access at `http://localhost:8000`
 |---------|-------------|
 | **Workspace** | Select the project directory for agents to work in |
 | **Browse** | Open native folder picker |
-| **Autonomous** | Toggle to allow agents to modify files directly |
+| **Autonomous** | Toggle to allow agents to modify files directly (default: on) |
 | **Auto Rounds** | When on, agents decide when to stop (default: on) |
 | **Max Rounds** | Maximum deliberation cycles (only applies when Auto Rounds is off) |
 | **Enclave Config** | Configure CLI binary for each agent role |
@@ -315,14 +308,17 @@ enclave/
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `STRATEGIST_BINARY` | - | CLI command for Architect |
-| `CRITIC_BINARY` | - | CLI command for Reviewer |
-| `OPTIMIZER_BINARY` | - | CLI command for Refactorer |
-| `CONTRARIAN_BINARY` | - | CLI command for Maintainer |
-| `JUDGE_BINARY` | - | CLI command for Lead Engineer |
+| `STRATEGIST_BINARY` | `minimax` | Provider for Architect |
+| `CRITIC_BINARY` | `minimax` | Provider for Reviewer |
+| `OPTIMIZER_BINARY` | `minimax` | Provider for Refactorer |
+| `CONTRARIAN_BINARY` | `minimax` | Provider for Maintainer |
+| `JUDGE_BINARY` | `minimax` | Provider for Lead Engineer |
+| `MINIMAX_API_KEY` | - | MiniMax API key (Token Plan) |
+| `MINIMAX_MODEL` | `MiniMax-M2.5` | MiniMax model name |
+| `MINIMAX_BASE_URL` | `https://api.minimax.io/anthropic` | MiniMax endpoint |
 | `WORKSPACE_DIR` | `./workspace` | Default workspace directory |
-| `AUTONOMOUS_MODE` | `false` | Default autonomous setting |
-| `MAX_ROUNDS` | `7` | Default deliberation rounds |
+| `AUTONOMOUS_MODE` | `true` | Default autonomous setting |
+| `MAX_ROUNDS` | `7` | Default deliberation rounds (ask judge after round 3) |
 | `MAX_TOKENS_PER_AGENT` | `1000` | Token limit per agent response |
 | `DEFAULT_TEMPERATURE` | `0.7` | Sampling temperature |
 | `HOST` | `127.0.0.1` | Server bind address |
