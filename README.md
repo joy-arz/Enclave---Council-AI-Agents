@@ -89,40 +89,33 @@ Sessions are automatically persisted to `.enclave_history.json` in your workspac
 
 ### Supported AI Providers
 
-Enclave supports both CLI agents and API-based providers. Select your preferred provider for each agent role directly from the UI dropdown.
+Enclave supports both CLI agents and API-based providers. **MiniMax is the default provider** for all agent roles, but you can switch any role to use CLI agents directly from the UI dropdown.
 
-#### CLI Agents
+#### Quick Start (MiniMax - Default)
 
-CLI agents run locally and can accept prompts via stdin. Autonomous mode flags are automatically applied:
-
-| CLI Agent | Autonomous Flag | Notes |
-|-----------|-----------------|-------|
-| **Qwen** (`qwen`) | `-y` | Use `qwen -y` or `--approval-mode yolo` |
-| **Gemini** (`gemini`) | `-y` | Google Gemini CLI |
-
-#### API Providers (Default: MiniMax)
-
-**MiniMax** is the default provider. It uses the Anthropic-compatible endpoint and supports the M2.5/M2.7 models.
-
-| API Provider | Model | Endpoint | Notes |
-|--------------|-------|---------|-------|
-| **MiniMax** (`minimax`) | MiniMax-M2.5 | Anthropic-compatible (`/v1/messages`) | Requires `MINIMAX_API_KEY` |
-
-**MiniMax Setup:**
 1. Get your API key from [platform.minimax.io](https://platform.minimax.io)
 2. Subscribe to the Token Plan for access to M2.5/M2.7 models
 3. Set `MINIMAX_API_KEY` in your `.env`
+4. Run `cargo run -- --server` and start coding!
 
-**How it works:** When autonomous mode is enabled, Enclave automatically detects the CLI agent and appends the appropriate flag to enable auto-approval of file edits and shell commands.
+#### CLI Agents
 
-**CLI Examples:**
-```bash
-# Qwen - YOLO mode
-qwen -y "fix the bug"
+CLI agents run locally. Select `gemini` or `qwen` from the dropdown in the UI sidebar for any agent role.
 
-# Gemini - YOLO mode
-gemini -y "refactor this"
-```
+| CLI Agent | Command | Notes |
+|-----------|---------|-------|
+| **Qwen** | `qwen -y "prompt"` | YOLO mode auto-approves changes |
+| **Gemini** | `gemini -y "prompt"` | Google Gemini CLI |
+
+#### API Providers
+
+| API Provider | Model | Endpoint | Notes |
+|--------------|-------|---------|-------|
+| **MiniMax** (default) | MiniMax-M2.5 | Anthropic-compatible (`/v1/messages`) | Requires `MINIMAX_API_KEY` |
+
+**How Autonomous Mode Works:**
+- **MiniMax**: Agents use internal tools (read_file, write_file, run_shell_command) that Enclave executes
+- **CLI Agents**: Flags like `-y` are automatically appended to enable file edits and command execution
 
 ### Configuration
 
