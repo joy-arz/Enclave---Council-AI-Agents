@@ -1,6 +1,6 @@
 # Enclave (Rust)
 
-A high-performance, multi-agent AI engineering system built with Rust. This system orchestrates local CLI agents (like `gemini` or `qwen`) to collaborate as active engineering partners, directly modifying the project's codebase until tasks are complete.
+A high-performance, multi-agent AI engineering system built with Rust. Enclave orchestrates AI agents (MiniMax by default, or CLI agents like `gemini`/`qwen`) to collaborate as active engineering partners, using tools to read files, run commands, and modify the codebase until tasks are complete.
 
 > **note:** This project is inspired by pewdiepie's local council AI, and even though this may not be as good as his, it aims to provide a powerful local multi-agent experience.
 
