@@ -16,11 +16,23 @@ pub struct config {
     #[serde(default = "default_workspace")]
     pub workspace_dir: PathBuf,
 
-    // api keys (legacy)
-    #[allow(dead_code)]
+    // API keys for direct LLM providers
+    pub minimax_api_key: Option<String>,
     pub openai_api_key: Option<String>,
-    #[allow(dead_code)]
     pub anthropic_api_key: Option<String>,
+    pub openrouter_api_key: Option<String>,
+
+    // MiniMax specific settings
+    #[serde(default = "default_minimax_model")]
+    pub minimax_model: String,
+    #[serde(default = "default_minimax_base_url")]
+    pub minimax_base_url: String,
+
+    // OpenRouter specific settings
+    #[serde(default = "default_openrouter_model")]
+    pub openrouter_model: String,
+    #[serde(default = "default_openrouter_base_url")]
+    pub openrouter_base_url: String,
 
     // cli binary mapping
     #[serde(default = "default_gemini_binary")]
@@ -57,6 +69,10 @@ fn default_true() -> bool { true }
 fn default_gemini_binary() -> String { "gemini-cli".to_string() }
 fn default_qwen_binary() -> String { "qwen-cli".to_string() }
 fn default_workspace() -> PathBuf { std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")) }
+fn default_minimax_model() -> String { "MiniMax-Text-01".to_string() }
+fn default_minimax_base_url() -> String { "https://api.minimax.chat".to_string() }
+fn default_openrouter_model() -> String { "anthropic/claude-3.5-sonnet".to_string() }
+fn default_openrouter_base_url() -> String { "https://openrouter.ai/api/v1".to_string() }
 
 #[allow(non_camel_case_types)]
 impl config {

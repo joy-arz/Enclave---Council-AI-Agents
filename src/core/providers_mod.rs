@@ -166,17 +166,22 @@ impl model_provider for cli_provider {
     }
 }
 
-#[allow(non_camel_case_types, dead_code)]
+/// OpenAI API provider with timeout
+#[allow(dead_code)]
+#[allow(non_camel_case_types)]
 pub struct openai_provider {
     client: Client,
     api_key: String,
 }
 
-#[allow(non_camel_case_types, dead_code)]
+#[allow(dead_code)]
 impl openai_provider {
     pub fn new(api_key: String) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .expect("failed to create HTTP client"),
             api_key,
         }
     }
@@ -231,17 +236,171 @@ impl model_provider for openai_provider {
     }
 }
 
-#[allow(non_camel_case_types, dead_code)]
+/// MiniMax API provider (default provider for nca)
+#[allow(dead_code)]
+#[allow(non_camel_case_types)]
+pub struct minimax_provider {
+    client: Client,
+    api_key: String,
+    model: String,
+    base_url: String,
+}
+
+#[allow(dead_code)]
+impl minimax_provider {
+    pub fn new(api_key: String, model: String, base_url: String) -> Self {
+        Self {
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .expect("failed to create HTTP client"),
+            api_key,
+            model,
+            base_url,
+        }
+    }
+}
+
+#[async_trait]
+#[allow(non_camel_case_types)]
+impl model_provider for minimax_provider {
+    async fn call_model(
+        &self,
+        _model: &str,
+        prompt: &str,
+        system_prompt: Option<&str>,
+        temperature: f32,
+        max_tokens: u32,
+    ) -> Result<(String, String), anyhow::Error> {
+        // MiniMax uses a different API format
+        let url = format!("{}/v1/text/chatcompletion_v2", self.base_url);
+
+        let body = serde_json::json!({
+            "model": self.model,
+            "messages": {
+                "role": "system",
+                "content": system_prompt.unwrap_or("")
+            },
+            "tokens_per_message": 128,
+            "sample_count": 1,
+            "max_tokens": max_tokens,
+            "temperature": temperature,
+            "prompt": prompt
+        });
+
+        let res = self.client.post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("Content-Type", "application/json")
+            .json(&body)
+            .send()
+            .await?;
+
+        let data: serde_json::Value = res.json().await?;
+
+        // MiniMax response format: choices[0].text
+        let content = data["choices"][0]["text"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("minimax response: text is missing or not a string"))?
+            .to_string();
+
+        Ok((content.clone(), content))
+    }
+}
+
+/// OpenRouter provider (unified API for multiple models)
+#[allow(dead_code)]
+#[allow(non_camel_case_types)]
+pub struct openrouter_provider {
+    client: Client,
+    api_key: String,
+    model: String,
+    base_url: String,
+}
+
+#[allow(dead_code)]
+impl openrouter_provider {
+    pub fn new(api_key: String, model: String, base_url: String) -> Self {
+        Self {
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .expect("failed to create HTTP client"),
+            api_key,
+            model,
+            base_url,
+        }
+    }
+}
+
+#[async_trait]
+#[allow(non_camel_case_types)]
+impl model_provider for openrouter_provider {
+    async fn call_model(
+        &self,
+        _model: &str,
+        prompt: &str,
+        system_prompt: Option<&str>,
+        temperature: f32,
+        max_tokens: u32,
+    ) -> Result<(String, String), anyhow::Error> {
+        let url = format!("{}/chat/completions", self.base_url);
+
+        let mut messages = Vec::new();
+        if let Some(sys) = system_prompt {
+            messages.push(serde_json::json!({ "role": "system", "content": sys }));
+        }
+        messages.push(serde_json::json!({ "role": "user", "content": prompt }));
+
+        let body = serde_json::json!({
+            "model": self.model,
+            "messages": messages,
+            "temperature": temperature,
+            "max_tokens": max_tokens
+        });
+
+        let res = self.client.post(&url)
+            .header("Authorization", format!("Bearer {}", self.api_key))
+            .header("HTTP-Referer", "https://enclave.local")
+            .header("X-Title", "Enclave")
+            .json(&body)
+            .send()
+            .await?;
+
+        let data: serde_json::Value = res.json().await?;
+
+        // OpenRouter uses OpenAI-compatible response format
+        let choices = data["choices"].as_array()
+            .ok_or_else(|| anyhow::anyhow!("openrouter response: choices is not an array"))?;
+
+        if choices.is_empty() {
+            return Err(anyhow::anyhow!("openrouter response: choices array is empty"));
+        }
+
+        let content = choices[0]["message"]["content"]
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("openrouter response: message content is missing or not a string"))?
+            .to_string();
+
+        Ok((content.clone(), content))
+    }
+}
+
+/// Anthropic API provider with timeout
+#[allow(dead_code)]
+#[allow(non_camel_case_types)]
 pub struct anthropic_provider {
     client: Client,
     api_key: String,
 }
 
-#[allow(non_camel_case_types, dead_code)]
+#[allow(dead_code)]
 impl anthropic_provider {
     pub fn new(api_key: String) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .timeout(std::time::Duration::from_secs(120))
+                .build()
+                .expect("failed to create HTTP client"),
             api_key,
         }
     }
@@ -291,5 +450,86 @@ impl model_provider for anthropic_provider {
             .to_string();
 
         Ok((content.clone(), content))
+    }
+}
+
+/// Provider factory for creating providers dynamically based on configuration
+pub mod factory {
+    use super::*;
+
+    #[derive(Debug, Clone, PartialEq)]
+    pub enum ProviderType {
+        Cli,
+        OpenAI,
+        Anthropic,
+        MiniMax,
+        OpenRouter,
+    }
+
+    impl From<&str> for ProviderType {
+        fn from(s: &str) -> Self {
+            match s.to_lowercase().as_str() {
+                "openai" | "gpt" => ProviderType::OpenAI,
+                "anthropic" | "claude" => ProviderType::Anthropic,
+                "minimax" => ProviderType::MiniMax,
+                "openrouter" => ProviderType::OpenRouter,
+                _ => ProviderType::Cli,
+            }
+        }
+    }
+
+    /// Create a provider based on the binary/config string
+    pub fn create_provider(
+        binary_or_config: &str,
+        workspace_dir: std::path::PathBuf,
+        api_key: Option<String>,
+        model: Option<String>,
+        base_url: Option<String>,
+        is_autonomous: bool,
+    ) -> Arc<dyn model_provider> {
+        let provider_type = ProviderType::from(binary_or_config);
+
+        match provider_type {
+            ProviderType::Cli => {
+                Arc::new(cli_provider::new(binary_or_config.to_string(), workspace_dir)
+                    .with_autonomous(is_autonomous))
+            }
+            ProviderType::OpenAI => {
+                if let Some(key) = api_key {
+                    Arc::new(openai_provider::new(key))
+                } else {
+                    tracing::warn!("OpenAI provider requested but no API key provided, falling back to CLI");
+                    Arc::new(cli_provider::new("gpt-cli".to_string(), workspace_dir))
+                }
+            }
+            ProviderType::Anthropic => {
+                if let Some(key) = api_key {
+                    Arc::new(anthropic_provider::new(key))
+                } else {
+                    tracing::warn!("Anthropic provider requested but no API key provided, falling back to CLI");
+                    Arc::new(cli_provider::new("claude".to_string(), workspace_dir))
+                }
+            }
+            ProviderType::MiniMax => {
+                if let Some(key) = api_key {
+                    let model = model.unwrap_or_else(|| "MiniMax-Text-01".to_string());
+                    let base_url = base_url.unwrap_or_else(|| "https://api.minimax.chat".to_string());
+                    Arc::new(minimax_provider::new(key, model, base_url))
+                } else {
+                    tracing::warn!("MiniMax provider requested but no API key provided, falling back to CLI");
+                    Arc::new(cli_provider::new("minimax-cli".to_string(), workspace_dir))
+                }
+            }
+            ProviderType::OpenRouter => {
+                if let Some(key) = api_key {
+                    let model = model.unwrap_or_else(|| "anthropic/claude-3.5-sonnet".to_string());
+                    let base_url = base_url.unwrap_or_else(|| "https://openrouter.ai/api/v1".to_string());
+                    Arc::new(openrouter_provider::new(key, model, base_url))
+                } else {
+                    tracing::warn!("OpenRouter provider requested but no API key provided, falling back to CLI");
+                    Arc::new(cli_provider::new("openrouter-cli".to_string(), workspace_dir))
+                }
+            }
+        }
     }
 }

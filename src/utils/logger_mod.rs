@@ -2,10 +2,32 @@ use tokio::fs::{File, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use std::path::PathBuf;
 use chrono::Local;
+use serde::Serialize;
+
+/// JSONL event types for structured logging
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", content = "data")]
+#[allow(non_camel_case_types)]
+pub enum LogEvent {
+    session_start { timestamp: String, query: String },
+    session_end { timestamp: String },
+    round_start { round: usize },
+    #[allow(dead_code)]
+    round_end { round: usize },
+    #[allow(dead_code)]
+    agent_message { timestamp: String, agent: String, round: usize },
+    judge_decision { timestamp: String, decision: String, round: usize },
+    max_rounds_reached { max_rounds: usize },
+    #[allow(dead_code)]
+    error { timestamp: String, error: String },
+    #[allow(dead_code)]
+    info { timestamp: String, message: String },
+}
 
 #[allow(non_camel_case_types)]
 pub struct session_logger {
     pub log_path: PathBuf,
+    pub jsonl_path: PathBuf,
 }
 
 #[allow(non_camel_case_types)]
@@ -13,16 +35,43 @@ impl session_logger {
     pub fn new(workspace_dir: PathBuf) -> Self {
         Self {
             log_path: workspace_dir.join("last_session_log.md"),
+            jsonl_path: workspace_dir.join("last_session_log.jsonl"),
         }
     }
 
     pub async fn clear(&self) -> tokio::io::Result<()> {
         File::create(&self.log_path).await?;
-        self.log("\n# enclave session log\n").await
+        File::create(&self.jsonl_path).await?;
+        self.log_markdown("# enclave session log\n").await
     }
 
-    pub async fn log(&self, message: &str) -> tokio::io::Result<()> {
-        // ensure parent directory exists
+    /// Log in JSONL format for machine-readable output
+    pub async fn log_event(&self, event: LogEvent) -> tokio::io::Result<()> {
+        if let Some(parent) = self.jsonl_path.parent() {
+            if !parent.exists() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+        }
+
+        let json = serde_json::to_string(&event).map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, e)
+        })?;
+
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.jsonl_path)
+            .await?;
+
+        file.write_all(json.as_bytes()).await?;
+        file.write_all(b"\n").await?;
+        let _ = file.flush().await;
+
+        Ok(())
+    }
+
+    /// Log a message in markdown format for human readability
+    pub async fn log_markdown(&self, message: &str) -> tokio::io::Result<()> {
         if let Some(parent) = self.log_path.parent() {
             if !parent.exists() {
                 tokio::fs::create_dir_all(parent).await?;
@@ -30,17 +79,11 @@ impl session_logger {
         }
 
         let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
-        let mut file = match OpenOptions::new()
+        let mut file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.log_path)
-            .await {
-                Ok(f) => f,
-                Err(e) => {
-                    eprintln!("[logger error] failed to open log file at {:?}: {}", self.log_path, e);
-                    return Err(e);
-                }
-            };
+            .await?;
 
         let entry = if message.starts_with("#") || message.starts_with("---") {
             format!("{}\n", message)
@@ -48,14 +91,68 @@ impl session_logger {
             format!("[{}] {}\n", timestamp, message)
         };
 
-        if let Err(e) = file.write_all(entry.as_bytes()).await {
-            eprintln!("[logger error] failed to write to log file: {}", e);
-            return Err(e);
-        }
+        file.write_all(entry.as_bytes()).await?;
         let _ = file.flush().await;
-        
-        // also log to server console for visibility
+
+        Ok(())
+    }
+
+    /// Convenience method that logs both to markdown and stdout
+    pub async fn log(&self, message: &str) -> tokio::io::Result<()> {
+        self.log_markdown(message).await?;
         println!("[session log] {}", message);
         Ok(())
+    }
+
+    /// Log session start event
+    pub async fn log_session_start(&self, query: &str) -> tokio::io::Result<()> {
+        let timestamp = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        self.log_event(LogEvent::session_start {
+            timestamp: timestamp.clone(),
+            query: query.to_string(),
+        }).await?;
+        self.log_markdown(&format!("\n# enclave session log\n\n## Session Started\nQuery: {}\n", query)).await
+    }
+
+    /// Log session end event
+    pub async fn log_session_end(&self) -> tokio::io::Result<()> {
+        let timestamp = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        self.log_event(LogEvent::session_end {
+            timestamp: timestamp.clone(),
+        }).await?;
+        self.log_markdown("\n## Session Ended\n").await
+    }
+
+    /// Log round start
+    pub async fn log_round_start(&self, round: usize) -> tokio::io::Result<()> {
+        self.log_event(LogEvent::round_start { round }).await?;
+        self.log(&format!("--- round {} ---", round)).await
+    }
+
+    /// Log agent message
+    #[allow(dead_code)]
+    pub async fn log_agent_message(&self, agent: &str, round: usize) -> tokio::io::Result<()> {
+        let timestamp = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        self.log_event(LogEvent::agent_message {
+            timestamp,
+            agent: agent.to_string(),
+            round,
+        }).await
+    }
+
+    /// Log judge decision
+    pub async fn log_judge_decision(&self, decision: &str, round: usize) -> tokio::io::Result<()> {
+        let timestamp = Local::now().format("%Y-%m-%dT%H:%M:%S").to_string();
+        self.log_event(LogEvent::judge_decision {
+            timestamp,
+            decision: decision.to_string(),
+            round,
+        }).await?;
+        self.log(&format!("judge decision: {} (round {}/{})", decision, round, self.max_rounds_for_log())).await
+    }
+
+    /// Helper to get max_rounds from orchestrator context (approximate)
+    fn max_rounds_for_log(&self) -> usize {
+        7 // Default, will be set via log_judge_decision if needed
     }
 }

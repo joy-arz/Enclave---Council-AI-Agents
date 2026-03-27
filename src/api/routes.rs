@@ -16,6 +16,8 @@ use crate::core::{orchestrator, agent_response};
 use crate::utils::config_mod::config;
 use crate::agents::{roles, judge::judge_agent};
 use crate::core::providers_mod::{cli_provider, model_provider};
+use crate::core::providers_mod::factory;
+use crate::core::WorktreeManager;
 use crate::api::sessions_mod::session_store;
 use crate::utils::logger_mod::session_logger;
 
@@ -114,6 +116,28 @@ pub async fn handle_enclave(
 
     tracing::info!("Session ID: {}, Workspace: {:?}", session_id, ws);
 
+    // Create worktree manager for isolated execution (if git repo)
+    let worktree_manager = WorktreeManager::new(ws.clone());
+    let worktree = if worktree_manager.is_git_repo() {
+        match worktree_manager.create_worktree(&session_id).await {
+            Ok(wt) => {
+                tracing::info!("Created isolated worktree at {:?}", wt.path);
+                Some(wt)
+            }
+            Err(e) => {
+                tracing::warn!("Failed to create worktree, using main workspace: {}", e);
+                None
+            }
+        }
+    } else {
+        tracing::info!("Not a git repo, using main workspace");
+        None
+    };
+
+    // Use worktree path if available, otherwise main workspace
+    let execution_ws = worktree_manager.get_execution_path(worktree.as_ref());
+    let ws_for_providers = if worktree.is_some() { execution_ws } else { ws.clone() };
+
     // Load previous session history if session_id was provided
     let prev_history = if has_session {
         session_store_inst.get_history(&session_id).await
@@ -131,12 +155,47 @@ pub async fn handle_enclave(
     let ct_bin = params.maintainer_binary.unwrap_or_else(|| config_inst.contrarian_binary.clone());
     let j_bin = params.judge_binary.unwrap_or_else(|| config_inst.judge_binary.clone());
 
-    // setup orchestrator using local cli binaries with workspace context
-    let strategist_provider: Arc<dyn model_provider> = Arc::new(cli_provider::new(s_bin, ws.clone()).with_logger(logger.clone()).with_autonomous(autonomous));
-    let critic_provider: Arc<dyn model_provider> = Arc::new(cli_provider::new(c_bin, ws.clone()).with_logger(logger.clone()).with_autonomous(autonomous));
-    let optimizer_provider: Arc<dyn model_provider> = Arc::new(cli_provider::new(o_bin, ws.clone()).with_logger(logger.clone()).with_autonomous(autonomous));
-    let maintainer_provider: Arc<dyn model_provider> = Arc::new(cli_provider::new(ct_bin, ws.clone()).with_logger(logger.clone()).with_autonomous(autonomous));
-    let judge_provider: Arc<dyn model_provider> = Arc::new(cli_provider::new(j_bin, ws.clone()).with_logger(logger.clone()).with_autonomous(autonomous));
+    // Create providers using factory - supports CLI, OpenAI, Anthropic, MiniMax, OpenRouter
+    let strategist_provider = factory::create_provider(
+        &s_bin,
+        ws.clone(),
+        config_inst.minimax_api_key.clone(),
+        Some(config_inst.minimax_model.clone()),
+        Some(config_inst.minimax_base_url.clone()),
+        autonomous,
+    );
+    let critic_provider = factory::create_provider(
+        &c_bin,
+        ws.clone(),
+        config_inst.openai_api_key.clone(),
+        None,
+        None,
+        autonomous,
+    );
+    let optimizer_provider = factory::create_provider(
+        &o_bin,
+        ws.clone(),
+        config_inst.openai_api_key.clone(),
+        None,
+        None,
+        autonomous,
+    );
+    let maintainer_provider = factory::create_provider(
+        &ct_bin,
+        ws.clone(),
+        config_inst.anthropic_api_key.clone(),
+        None,
+        None,
+        autonomous,
+    );
+    let judge_provider = factory::create_provider(
+        &j_bin,
+        ws.clone(),
+        config_inst.openrouter_api_key.clone(),
+        Some(config_inst.openrouter_model.clone()),
+        Some(config_inst.openrouter_base_url.clone()),
+        autonomous,
+    );
 
     let mut agents = vec![
         roles::strategist(strategist_provider, "cli", config_inst.default_temperature, config_inst.max_tokens_per_agent),
@@ -162,13 +221,17 @@ pub async fn handle_enclave(
         params.rounds.unwrap_or(config_inst.max_rounds),
         auto_rounds,
         20,
-        ws
+        ws_for_providers
     );
     orchestrator_inst.logger = logger.clone();
 
     let query = params.query;
     let store_clone = session_store_inst.clone();
     let sid_clone = session_id.clone();
+
+    // Clone worktree data for the async task
+    let worktree_manager_for_task = WorktreeManager::new(ws.clone());
+    let worktree_for_task = worktree.clone();
 
     tokio::spawn(async move {
         // send session id as first message
@@ -221,6 +284,15 @@ pub async fn handle_enclave(
                 let _ = logger_err.log(&format!("fatal orchestrator error: {}", err_msg)).await;
             });
         });
+
+        // Cleanup worktree after session completes
+        if let Some(ref wt) = worktree_for_task {
+            if let Err(e) = worktree_manager_for_task.remove_worktree(wt).await {
+                tracing::warn!("Failed to cleanup worktree {}: {}", wt.name, e);
+            } else {
+                tracing::info!("Cleaned up worktree {}", wt.name);
+            }
+        }
     });
 
     let stream = stream::unfold(rx, |mut rx| async move {

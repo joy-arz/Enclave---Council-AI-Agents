@@ -1,6 +1,6 @@
 use crate::agents::{base_agent, judge_agent};
 use crate::core::memory::shared_memory;
-use crate::utils::logger_mod::session_logger;
+use crate::utils::logger_mod::{session_logger, LogEvent};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use serde::{Serialize, Deserialize};
@@ -84,9 +84,9 @@ impl orchestrator {
         F: FnMut(agent_response) -> Fut,
         Fut: std::future::Future<Output = Result<(), ()>>,
     {
-        // init session log
+        // init session log (both markdown and JSONL)
         let _ = self.logger.clear().await;
-        let _ = self.logger.log(&format!("--- session started ---\nquery: {}", query)).await;
+        let _ = self.logger.log_session_start(query).await;
 
         {
             let mut mem = self.memory.lock().await;
@@ -124,7 +124,7 @@ impl orchestrator {
 
         loop {
             round += 1;
-            let _ = self.logger.log(&format!("--- round {} ---", round)).await;
+            let _ = self.logger.log_round_start(round).await;
 
             // sequential phase: the strategist always sets the baseline
             let strategist = &self.agents[0];
@@ -206,7 +206,7 @@ impl orchestrator {
             // In auto-rounds mode, judge decides if we should continue
             // Otherwise, we proceed until max_rounds is reached
             if self.auto_rounds && round >= 3 {
-                // Only ask judge after at least 2 rounds (strategist + parallel agents)
+                // Only ask judge after at least 3 rounds (strategist + parallel agents)
                 // This gives enough context for a meaningful decision
                 let _ = self.logger.log("--- checking judge for auto decision ---").await;
                 let history = self.memory.lock().await.get_formatted_history();
@@ -214,7 +214,7 @@ impl orchestrator {
                 if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&verdict_json) {
                     if let Some(decision) = parsed.get("final_decision").and_then(|d| d.as_str()) {
                         verdict = Some(verdict_json);
-                        let _ = self.logger.log(&format!("judge decision: {} (round {}/{})", decision, round, self.max_rounds)).await;
+                        let _ = self.logger.log_judge_decision(decision, round).await;
 
                         // If judge says FINISHED or PAUSED, we're done
                         if decision != "CONTINUE" {
@@ -227,6 +227,7 @@ impl orchestrator {
             // Hard stop at max_rounds - this is the absolute limit
             if round >= self.max_rounds {
                 let _ = self.logger.log(&format!("max rounds ({}) reached", self.max_rounds)).await;
+                let _ = self.logger.log_event(LogEvent::max_rounds_reached { max_rounds: self.max_rounds }).await;
                 break;
             }
         }
@@ -257,6 +258,7 @@ impl orchestrator {
         let state_path = self.get_state_path().await;
         let _ = fs::write(state_path, &final_verdict).await;
         let _ = self.logger.log("project state updated. session complete.").await;
+        let _ = self.logger.log_session_end().await;
 
         Ok(final_verdict)
     }

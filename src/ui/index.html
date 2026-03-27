@@ -1656,44 +1656,114 @@
 
             <div class="agent-config">
                 <span class="label">Enclave Config</span>
-                <div class="explanation" style="margin-bottom: 8px;">CLI start commands for each role.</div>
-                
+                <div class="explanation" style="margin-bottom: 8px;">Select AI provider for each role.</div>
+
                 <div class="agent-input-row">
                     <span class="agent-label">Architect</span>
-                    <div class="input-wrapper" style="padding: 6px 10px;">
-                        <input type="text" id="bin-strategist" placeholder="e.g. gemini">
+                    <div class="input-wrapper" style="padding: 4px 8px;">
+                        <select id="bin-strategist" style="background: var(--surface); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px; font-size: 0.8rem; min-width: 120px;">
+                            <optgroup label="CLI">
+                                <option value="gemini" selected>gemini</option>
+                                <option value="qwen">qwen</option>
+                                <option value="codex">codex</option>
+                                <option value="claude">claude</option>
+                                <option value="opencode">opencode</option>
+                            </optgroup>
+                            <optgroup label="API">
+                                <option value="minimax">minimax (API)</option>
+                                <option value="openai">openai (API)</option>
+                                <option value="anthropic">anthropic (API)</option>
+                                <option value="openrouter">openrouter (API)</option>
+                            </optgroup>
+                        </select>
                         <button class="test-btn" data-role="strategist">Test</button>
                     </div>
                 </div>
-                
+
                 <div class="agent-input-row">
                     <span class="agent-label">Reviewer</span>
-                    <div class="input-wrapper" style="padding: 6px 10px;">
-                        <input type="text" id="bin-critic" placeholder="e.g. qwen">
+                    <div class="input-wrapper" style="padding: 4px 8px;">
+                        <select id="bin-critic" style="background: var(--surface); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px; font-size: 0.8rem; min-width: 120px;">
+                            <optgroup label="CLI">
+                                <option value="gemini">gemini</option>
+                                <option value="qwen" selected>qwen</option>
+                                <option value="codex">codex</option>
+                                <option value="claude">claude</option>
+                                <option value="opencode">opencode</option>
+                            </optgroup>
+                            <optgroup label="API">
+                                <option value="minimax">minimax (API)</option>
+                                <option value="openai">openai (API)</option>
+                                <option value="anthropic">anthropic (API)</option>
+                                <option value="openrouter">openrouter (API)</option>
+                            </optgroup>
+                        </select>
                         <button class="test-btn" data-role="critic">Test</button>
                     </div>
                 </div>
 
                 <div class="agent-input-row">
                     <span class="agent-label">Refactorer</span>
-                    <div class="input-wrapper" style="padding: 6px 10px;">
-                        <input type="text" id="bin-optimizer" placeholder="e.g. gemini">
+                    <div class="input-wrapper" style="padding: 4px 8px;">
+                        <select id="bin-optimizer" style="background: var(--surface); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px; font-size: 0.8rem; min-width: 120px;">
+                            <optgroup label="CLI">
+                                <option value="gemini" selected>gemini</option>
+                                <option value="qwen">qwen</option>
+                                <option value="codex">codex</option>
+                                <option value="claude">claude</option>
+                                <option value="opencode">opencode</option>
+                            </optgroup>
+                            <optgroup label="API">
+                                <option value="minimax">minimax (API)</option>
+                                <option value="openai">openai (API)</option>
+                                <option value="anthropic">anthropic (API)</option>
+                                <option value="openrouter">openrouter (API)</option>
+                            </optgroup>
+                        </select>
                         <button class="test-btn" data-role="optimizer">Test</button>
                     </div>
                 </div>
 
                 <div class="agent-input-row">
                     <span class="agent-label">Maintainer</span>
-                    <div class="input-wrapper" style="padding: 6px 10px;">
-                        <input type="text" id="bin-maintainer" placeholder="e.g. qwen">
+                    <div class="input-wrapper" style="padding: 4px 8px;">
+                        <select id="bin-maintainer" style="background: var(--surface); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px; font-size: 0.8rem; min-width: 120px;">
+                            <optgroup label="CLI">
+                                <option value="gemini">gemini</option>
+                                <option value="qwen" selected>qwen</option>
+                                <option value="codex">codex</option>
+                                <option value="claude">claude</option>
+                                <option value="opencode">opencode</option>
+                            </optgroup>
+                            <optgroup label="API">
+                                <option value="minimax">minimax (API)</option>
+                                <option value="openai">openai (API)</option>
+                                <option value="anthropic">anthropic (API)</option>
+                                <option value="openrouter">openrouter (API)</option>
+                            </optgroup>
+                        </select>
                         <button class="test-btn" data-role="maintainer">Test</button>
                     </div>
                 </div>
 
                 <div class="agent-input-row">
                     <span class="agent-label">Lead Engineer</span>
-                    <div class="input-wrapper" style="padding: 6px 10px;">
-                        <input type="text" id="bin-judge" placeholder="e.g. gemini">
+                    <div class="input-wrapper" style="padding: 4px 8px;">
+                        <select id="bin-judge" style="background: var(--surface); border: 1px solid var(--border); border-radius: 4px; color: var(--text); padding: 4px 8px; font-size: 0.8rem; min-width: 120px;">
+                            <optgroup label="CLI">
+                                <option value="gemini" selected>gemini</option>
+                                <option value="qwen">qwen</option>
+                                <option value="codex">codex</option>
+                                <option value="claude">claude</option>
+                                <option value="opencode">opencode</option>
+                            </optgroup>
+                            <optgroup label="API">
+                                <option value="minimax">minimax (API)</option>
+                                <option value="openai">openai (API)</option>
+                                <option value="anthropic">anthropic (API)</option>
+                                <option value="openrouter">openrouter (API)</option>
+                            </optgroup>
+                        </select>
                         <button class="test-btn" data-role="judge">Test</button>
                     </div>
                 </div>

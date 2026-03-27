@@ -89,30 +89,42 @@ Sessions are automatically persisted to `.enclave_history.json` in your workspac
 
 ### Supported AI Providers
 
-Enclave supports any CLI agent that can accept prompts via stdin. The autonomous mode (auto-approval) flags are automatically applied based on the CLI detected:
+Enclave supports both CLI agents and API-based providers. Select your preferred provider for each agent role directly from the UI dropdown.
+
+#### CLI Agents
+
+CLI agents run locally and can accept prompts via stdin. Autonomous mode flags are automatically applied:
 
 | CLI Agent | Autonomous Flag | Notes |
 |-----------|-----------------|-------|
-| **Qwen** (`qwen`) | `--yolo` or `-y` | Use `qwen --yolo` or `--approval-mode yolo` |
-| **Gemini** (`gemini`) | `--yolo` or `-y` | Google Gemini CLI |
+| **Qwen** (`qwen`) | `-y` | Use `qwen -y` or `--approval-mode yolo` |
+| **Gemini** (`gemini`) | `-y` | Google Gemini CLI |
 | **Codex** (`codex`) | `--full-auto` | OpenAI's Codex CLI |
 | **Claude Code** (`claude`) | `--dangerously-skip-permissions` | Anthropic's Claude CLI |
-| **OpenCode** (`opencode`) | `--yolo` | Supports `--yolo` or `--dangerously-skip-permissions` |
+| **OpenCode** (`opencode`) | `-y` | Supports `-y` or `--dangerously-skip-permissions` |
+
+#### API Providers
+
+API providers require an API key but offer faster execution without local setup:
+
+| API Provider | Model | Notes |
+|--------------|-------|-------|
+| **MiniMax** (`minimax`) | MiniMax-Text-01 | Requires `MINIMAX_API_KEY` |
+| **OpenAI** (`openai`) | GPT-4o | Requires `OPENAI_API_KEY` |
+| **Anthropic** (`anthropic`) | Claude 3.5 Sonnet | Requires `ANTHROPIC_API_KEY` |
+| **OpenRouter** (`openrouter`) | Mixed models | Requires `OPENROUTER_API_KEY` |
 
 **How it works:** When autonomous mode is enabled, Enclave automatically detects the CLI agent and appends the appropriate flag to enable auto-approval of file edits and shell commands.
 
 **Examples:**
 ```bash
-# Qwen - YOLO mode
-qwen --yolo "fix the bug"
+# CLI - YOLO mode
+qwen -y "fix the bug"
 
-# Gemini - YOLO mode
-gemini --yolo "refactor this"
-
-# Codex - Full auto
+# CLI - Full auto
 codex --full-auto "implement feature"
 
-# Claude Code - Skip permissions
+# CLI - Skip permissions
 claude --dangerously-skip-permissions "analyze code"
 ```
 
@@ -129,20 +141,26 @@ Open `.env` and configure:
 ```env
 # CLI binary mapping - map each role to your preferred CLI agent
 # Supported agents: qwen, gemini, codex, claude, opencode
-STRATEGIST_BINARY=gemini      # Architect agent
-CRITIC_BINARY=qwen            # Reviewer agent
-OPTIMIZER_BINARY=gemini       # Refactorer agent
-CONTRARIAN_BINARY=qwen        # Maintainer agent
-JUDGE_BINARY=gemini           # Lead Engineer agent
+# Or use "openai", "anthropic", "minimax", "openrouter" for API-based providers
+STRATEGIST_BINARY=gemini
+CRITIC_BINARY=qwen
+OPTIMIZER_BINARY=gemini
+CONTRARIAN_BINARY=qwen
+JUDGE_BINARY=gemini
 
-# Optional defaults
-WORKSPACE_DIR=/absolute/path/to/project
-AUTONOMOUS_MODE=false
-MAX_ROUNDS=7                  # Default deliberation rounds (ask judge after round 3)
+# API Keys (optional - CLI binaries are used by default)
+MINIMAX_API_KEY=
+OPENAI_API_KEY=
+ANTHROPIC_API_KEY=
+OPENROUTER_API_KEY=
+
+# Session defaults
+MAX_ROUNDS=7
 MAX_TOKENS_PER_AGENT=1000
 DEFAULT_TEMPERATURE=0.7
 HOST=127.0.0.1
 PORT=8000
+AUTONOMOUS_MODE=false
 ```
 
 ### Building
