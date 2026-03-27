@@ -33,27 +33,19 @@ pub fn parse_tool_calls(response: &str) -> Vec<ToolCall> {
 /// Detect natural language mentions of tool usage
 fn parse_natural_language(response: &str) -> Vec<ToolCall> {
     let mut calls = Vec::new();
-    let tool_names = ["list_directory", "read_file", "write_file", "run_shell_command", "grep"];
+    let tool_contexts = [
+        ("list_directory", vec!["list directory", "list the directory", "see what's in", "check the files", "view files", "view directory"]),
+        ("read_file", vec!["read the file", "check the file", "look at the file", "examine the file"]),
+        ("write_file", vec!["write the file", "create the file", "update the file", "edit the file"]),
+        ("run_shell_command", vec!["run command", "execute command", "run ls", "execute ls", "run `"]),
+        ("grep", vec!["search for", "find in files", "grep for", "look for pattern"]),
+    ];
 
-    for tool_name in &tool_names {
-        // Pattern variations that indicate tool use:
-        // "use list_directory", "use the list_directory", "use list_directory tool"
-        // "I'll use list_directory", "I will use list_directory"
-        let patterns = [
-            format!("use {}(", tool_name),
-            format!("use the {}(", tool_name),
-            format!("use the {} tool", tool_name),
-            format!("I'll use {}(", tool_name),
-            format!("I will use {}(", tool_name),
-            format!("I need to use {}(", tool_name),
-            format!("I should use {}(", tool_name),
-            format!("use {} to", tool_name),
-            format!("use {} tool", tool_name),
-        ];
-
-        for pattern in &patterns {
-            if response.contains(pattern) || response.contains(&format!("{} tool", tool_name)) {
-                // Try to extract arguments from context
+    for (tool_name, contexts) in &tool_contexts {
+        for context in contexts {
+            // Check if response mentions the context
+            if response.to_lowercase().contains(&context.to_lowercase()) {
+                // Try to extract the actual tool call from the response
                 let default_args = match *tool_name {
                     "list_directory" => serde_json::json!({"path": "."}),
                     "read_file" => serde_json::json!({"path": "."}),
@@ -67,6 +59,29 @@ fn parse_natural_language(response: &str) -> Vec<ToolCall> {
                     arguments: default_args,
                 });
                 break;
+            }
+        }
+    }
+
+    // Also check for explicit tool mentions with "tool" suffix
+    let tool_names = ["list_directory", "read_file", "write_file", "run_shell_command", "grep"];
+    for tool_name in &tool_names {
+        let with_tool = format!("{} tool", tool_name);
+        if response.to_lowercase().contains(&with_tool.to_lowercase()) {
+            // Check if we already have this tool
+            if !calls.iter().any(|c| &c.name == tool_name) {
+                let default_args = match *tool_name {
+                    "list_directory" => serde_json::json!({"path": "."}),
+                    "read_file" => serde_json::json!({"path": "."}),
+                    "write_file" => serde_json::json!({"path": "", "content": ""}),
+                    "run_shell_command" => serde_json::json!({"command": "ls"}),
+                    "grep" => serde_json::json!({"pattern": "", "path": "."}),
+                    _ => serde_json::json!({}),
+                };
+                calls.push(ToolCall {
+                    name: tool_name.to_string(),
+                    arguments: default_args,
+                });
             }
         }
     }

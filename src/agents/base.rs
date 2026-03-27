@@ -95,6 +95,13 @@ impl base_agent {
             // Parse tool calls from response
             let tool_calls = parse_tool_calls(&response);
 
+            // Debug: log the response and detected tool calls
+            tracing::debug!("{} response (iteration {}): {} chars, {} tool calls detected",
+                self.name, iterations, response.len(), tool_calls.len());
+            if !tool_calls.is_empty() {
+                tracing::debug!("Tool calls: {:?}", tool_calls);
+            }
+
             if tool_calls.is_empty() {
                 // No tool calls, this is the final response
                 if final_text.is_empty() {
