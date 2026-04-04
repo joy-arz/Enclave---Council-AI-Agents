@@ -2,7 +2,9 @@ use std::sync::Arc;
 use std::path::PathBuf;
 use crate::core::model_provider;
 use crate::core::providers_mod::StreamChunk;
-use crate::core::tools::{execute_tool, parse_tool_calls};
+use crate::core::tools::execute_tool;
+use crate::core::BusyState;
+use crate::core::approval::ApprovalPolicy;
 
 #[derive(Debug, Clone)]
 #[allow(non_camel_case_types)]
@@ -31,6 +33,13 @@ pub struct base_agent {
     pub is_autonomous: bool,
     pub workspace_dir: PathBuf,
     pub max_tool_iterations: usize,
+    // Infinite loop protection: track consecutive failures per tool
+    consecutive_tool_failures: usize,
+    last_failed_tool: Option<String>,
+    // Busy state for UI
+    pub busy_state: BusyState,
+    // Approval policy for non-autonomous mode
+    approval_policy: Option<ApprovalPolicy>,
 }
 
 #[allow(non_camel_case_types)]
@@ -55,11 +64,24 @@ impl base_agent {
             is_autonomous: false,
             workspace_dir: PathBuf::from("."),
             max_tool_iterations: 5,
+            consecutive_tool_failures: 0,
+            last_failed_tool: None,
+            busy_state: BusyState::Idle,
+            approval_policy: None,
         }
+    }
+
+    /// Update the busy state
+    pub fn set_busy_state(&mut self, state: BusyState) {
+        self.busy_state = state;
     }
 
     pub fn set_autonomous(&mut self, value: bool) {
         self.is_autonomous = value;
+    }
+
+    pub fn set_approval_policy(&mut self, policy: ApprovalPolicy) {
+        self.approval_policy = Some(policy);
     }
 
     #[allow(dead_code)]
@@ -104,7 +126,7 @@ Examples of BAD responses (do not do these):
     }
 
     /// Execute a response with tool calls, continuing until no more tool calls or max iterations reached
-    pub async fn get_response_with_tools(&self, history: &str) -> Result<agent_result, anyhow::Error> {
+    pub async fn get_response_with_tools(&mut self, history: &str) -> Result<agent_result, anyhow::Error> {
         let mut current_history = history.to_string();
         let mut iterations = 0;
         let mut final_text = String::new();
@@ -146,23 +168,22 @@ Examples of BAD responses (do not do these):
                     StreamChunk::TextDelta(text) => {
                         text_buffer.push_str(&text);
                     }
-                    StreamChunk::ToolStart { name: _, .. } => {
-                        // Tool started - we'll capture the name in ToolEnd
+                    StreamChunk::ToolUse { name, input, .. } => {
+                        // Tool call detected - capture name and input
                         current_tool_input.clear();
+                        tool_calls_from_stream.push((name, input.to_string()));
                     }
                     StreamChunk::ToolInputDelta(delta) => {
                         current_tool_input.push_str(&delta);
-                    }
-                    StreamChunk::ToolEnd { name, input, .. } => {
-                        let final_input = if input.is_empty() { current_tool_input.clone() } else { input };
-                        tool_calls_from_stream.push((name, final_input));
-                        current_tool_input.clear();
                     }
                     StreamChunk::Usage { .. } => {}
                     StreamChunk::Done => break,
                     StreamChunk::Error(e) => {
                         tracing::warn!("Streaming error: {}", e);
                         break;
+                    }
+                    StreamChunk::ThinkingDelta(_) => {
+                        // Ignore thinking blocks for now
                     }
                 }
             }
@@ -195,8 +216,33 @@ Examples of BAD responses (do not do these):
                     name: name.clone(),
                     arguments: serde_json::Value::Object(args),
                 };
-                
-                let result = execute_tool(&call, &self.workspace_dir).await;
+
+                // In autonomous mode, pass None (no approval needed)
+                // In non-autonomous mode, use approval_policy if set
+                let policy_ref = if self.is_autonomous {
+                    None
+                } else {
+                    self.approval_policy.as_ref()
+                };
+
+                let result = execute_tool(&call, &self.workspace_dir, policy_ref).await;
+
+                // Handle pending approval in non-autonomous mode
+                if !self.is_autonomous {
+                    if let Some(ref err) = result.error {
+                        if err == "PENDING_APPROVAL" {
+                            // Return special result indicating pending approval
+                            tool_results.push(crate::core::tools::ToolResult {
+                                name: name.clone(),
+                                success: false,
+                                output: String::new(),
+                                error: Some(format!("[Approval Required] Tool '{}' requires approval. Suggest using autonomous mode or adding to allow list.", name)),
+                            });
+                            continue;
+                        }
+                    }
+                }
+
                 tool_results.push(result);
             }
 
@@ -238,138 +284,36 @@ Examples of BAD responses (do not do these):
                 }
             }).collect();
             final_text.push_str(&summaries.join(" "));
-        }
 
-        Ok(agent_result {
-            response: final_text,
-            tool_calls: all_tool_calls,
-        })
-    }
+            // Infinite loop protection: track consecutive failures
+            let all_same_tool = tool_calls_from_stream.iter().all(|(name, _)| {
+                name == &tool_calls_from_stream.first().unwrap().0
+            });
+            let all_failed = tool_results.iter().all(|r| !r.success);
 
-    /// Execute a response with tool calls using streaming API
-    /// Tool calls are executed as they arrive from the stream
-    pub async fn get_response_with_tools_streaming<F>(
-        &self,
-        history: &str,
-        mut on_chunk: F,
-    ) -> Result<agent_result, anyhow::Error>
-    where
-        F: FnMut(String) + Send,
-    {
-        let mut current_history = history.to_string();
-        let mut iterations = 0;
-        let mut final_text = String::new();
-        let mut all_tool_calls: Vec<tool_call_result> = Vec::new();
-
-        let tools_json = crate::core::tools::get_tools_json();
-
-        loop {
-            iterations += 1;
-            if iterations > self.max_tool_iterations {
-                final_text.push_str("\n[Max tool iterations reached]");
-                break;
-            }
-
-            let prompt = format!(
-                "current conversation history:\n{}\n\nrespond as the {}. use tools if needed to complete the task.",
-                current_history, self.name
-            );
-
-            let mut rx = self.provider.call_model_streaming(
-                &self.model_name,
-                &prompt,
-                Some(&self.build_full_system_prompt()),
-                self.temperature,
-                self.max_tokens,
-                Some(&tools_json),
-            ).await?;
-
-            // Streaming state
-            let mut _current_tool_id: Option<String> = None;
-            let mut _current_tool_name: Option<String> = None;
-            let mut current_tool_input: String = String::new();
-            let mut text_buffer = String::new();
-            let mut _tool_started = false;
-
-            // Process stream
-            while let Some(chunk) = rx.recv().await {
-                match chunk {
-                    StreamChunk::TextDelta(text) => {
-                        text_buffer.push_str(&text);
-                        on_chunk(text);
-                    }
-                    StreamChunk::ToolStart { id, name } => {
-                        _current_tool_id = Some(id);
-                        _current_tool_name = Some(name);
-                        _tool_started = true;
-                    }
-                    StreamChunk::ToolInputDelta(delta) => {
-                        current_tool_input.push_str(&delta);
-                    }
-                    StreamChunk::ToolEnd { id: _, name, input } => {
-                        // Execute the tool immediately
-                        let tool_input = if input.is_empty() { current_tool_input.clone() } else { input };
-                        
-                        let call = crate::core::tools::ToolCall {
-                            name: name.clone(),
-                            arguments: if tool_input.is_empty() {
-                                serde_json::Value::Object(serde_json::Map::new())
-                            } else {
-                                serde_json::from_str(&tool_input).unwrap_or(serde_json::Value::Null)
-                            },
-                        };
-                        
-                        let result = execute_tool(&call, &self.workspace_dir).await;
-                        
-                        all_tool_calls.push(tool_call_result {
-                            name: name.clone(),
-                            status: if result.success { "success".to_string() } else { "error".to_string() },
-                            output: Some(if result.success { result.output.clone() } else { result.error.clone().unwrap_or_default() }),
-                        });
-
-                        // Add result to history for next iteration
-                        let tool_result_text = if result.success { result.output.clone() } else { result.error.clone().unwrap_or_else(|| "Unknown error".to_string()) };
-                        current_history.push_str(&format!(
-                            "\n\n[Tool: {}]\n{}\n[End Tool]",
-                            name,
-                            tool_result_text
-                        ));
-
-                        // Clear streaming state
-                        _current_tool_id = None;
-                        _current_tool_name = None;
-                        current_tool_input.clear();
-                        _tool_started = false;
-                    }
-                    StreamChunk::Usage { .. } => {
-                        // Usage stats - could be logged
-                    }
-                    StreamChunk::Done => {
-                        break;
-                    }
-                    StreamChunk::Error(e) => {
-                        tracing::error!("Streaming error: {}", e);
-                        break;
-                    }
-                }
-            }
-
-            // After stream ends, check if we have tool calls to process
-            if all_tool_calls.len() == iterations - 1 {
-                // No new tool calls this iteration - this is the final response
-                let cleaned = text_buffer.trim().to_string();
-                if !cleaned.is_empty() {
-                    if !final_text.is_empty() {
-                        final_text.push('\n');
-                        final_text.push_str(&cleaned);
+            if all_same_tool && all_failed && tool_calls_from_stream.len() == 1 {
+                if let Some(ref last) = self.last_failed_tool {
+                    if *last == tool_calls_from_stream.first().unwrap().0 {
+                        self.consecutive_tool_failures += 1;
                     } else {
-                        final_text = cleaned;
+                        self.consecutive_tool_failures = 1;
+                        self.last_failed_tool = Some(tool_calls_from_stream.first().unwrap().0.clone());
                     }
+                } else {
+                    self.consecutive_tool_failures = 1;
+                    self.last_failed_tool = Some(tool_calls_from_stream.first().unwrap().0.clone());
                 }
-                break;
-            } else if iterations > all_tool_calls.len() {
-                // We had tool calls but they weren't completed
-                break;
+
+                if self.consecutive_tool_failures >= 3 {
+                    final_text.push_str(&format!(
+                        "\n[Infinite tool loop detected: {} failed 3 times consecutively. Stopping.]",
+                        tool_calls_from_stream.first().unwrap().0
+                    ));
+                    break;
+                }
+            } else {
+                self.consecutive_tool_failures = 0;
+                self.last_failed_tool = None;
             }
         }
 
@@ -414,28 +358,10 @@ Examples of BAD responses (do not do these):
             is_autonomous: self.is_autonomous,
             workspace_dir: self.workspace_dir.clone(),
             max_tool_iterations: self.max_tool_iterations,
+            consecutive_tool_failures: 0,
+            last_failed_tool: None,
+            busy_state: BusyState::Idle,
+            approval_policy: self.approval_policy.clone(),
         }
-    }
-}
-
-/// Extract text content before any tool call block
-#[allow(dead_code)]
-fn extract_text_before_tools(response: &str) -> String {
-    // Find first tool call marker
-    let markers = ["```json", "<tool_call>", "<function>", "read_file(", "write_file(", "run_shell_command(", "list_directory(", "grep("];
-
-    let mut earliest = usize::MAX;
-    for marker in &markers {
-        if let Some(pos) = response.find(marker) {
-            if pos < earliest {
-                earliest = pos;
-            }
-        }
-    }
-
-    if earliest == usize::MAX {
-        response.trim().to_string()
-    } else {
-        response[..earliest].trim().to_string()
     }
 }

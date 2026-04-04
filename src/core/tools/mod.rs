@@ -6,10 +6,6 @@ use std::path::PathBuf;
 use tokio::fs;
 use tokio::process::Command;
 
-pub mod parser;
-
-pub use parser::parse_tool_calls;
-
 /// Represents a tool call from the model
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolCall {
@@ -174,13 +170,42 @@ pub fn get_tools_json() -> String {
     json
 }
 
-/// Execute a tool call
+/// Execute a tool call with optional approval policy
+/// If policy is Some and tool requires approval, returns ToolResult with error "PENDING_APPROVAL"
 pub async fn execute_tool(
     tool_call: &ToolCall,
     workspace_dir: &PathBuf,
+    policy: Option<&crate::core::approval::ApprovalPolicy>,
 ) -> ToolResult {
     let name = &tool_call.name;
     let args = &tool_call.arguments;
+
+    // Check approval policy if provided
+    if let Some(p) = policy {
+        let tool_input = args.to_string();
+        let tier = p.check(name, &tool_input);
+        match tier {
+            crate::core::approval::PermissionTier::Denied => {
+                return ToolResult {
+                    name: name.clone(),
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Tool '{}' denied by approval policy", name)),
+                };
+            }
+            crate::core::approval::PermissionTier::Ask => {
+                return ToolResult {
+                    name: name.clone(),
+                    success: false,
+                    output: String::new(),
+                    error: Some("PENDING_APPROVAL".to_string()),
+                };
+            }
+            crate::core::approval::PermissionTier::Allowed => {
+                // Proceed with execution
+            }
+        }
+    }
 
     match name.as_str() {
         "read_file" => execute_read_file(args, workspace_dir).await,
@@ -562,24 +587,53 @@ async fn execute_list_directory(args: &serde_json::Value, workspace_dir: &PathBu
         .or_else(|| args.get("absolute_path"))
         .and_then(|v| v.as_str())
         .unwrap_or(".");
+
+    // SECURITY: Validate path stays within workspace (prevent traversal)
     let full_path = if PathBuf::from(path).is_absolute() {
         PathBuf::from(path)
     } else {
         workspace_dir.join(path)
     };
 
-    if !full_path.exists() {
+    // Check that resolved path is within workspace
+    let resolved = match full_path.canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            return ToolResult {
+                name: "list_directory".to_string(),
+                success: false,
+                output: String::new(),
+                error: Some(format!("Directory not found or inaccessible: {}", e)),
+            };
+        }
+    };
+
+    let workspace_resolved = match workspace_dir.canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            return ToolResult {
+                name: "list_directory".to_string(),
+                success: false,
+                output: String::new(),
+                error: Some(format!("Workspace error: {}", e)),
+            };
+        }
+    };
+
+    if !resolved.starts_with(&workspace_resolved) {
         return ToolResult {
             name: "list_directory".to_string(),
             success: false,
             output: String::new(),
-            error: Some(format!("Directory not found: {}", path)),
+            error: Some("Security violation: path escapes workspace".to_string()),
         };
     }
 
+    // Use -- to prevent option injection (path can't start with -)
     let mut cmd = Command::new("ls");
     cmd.arg("-la");
-    cmd.arg(path);
+    cmd.arg("--");  // Separator - everything after is a path, not an option
+    cmd.arg(path);  // Use original path since we validated above
     cmd.current_dir(workspace_dir);
 
     let output = cmd.output().await;

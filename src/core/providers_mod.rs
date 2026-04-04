@@ -10,22 +10,30 @@ use serde::{Deserialize, Serialize};
 use futures::StreamExt;
 
 /// Stream chunk types for streaming responses
+/// Matches nca-cli's Provider streaming pattern
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", content = "data")]
 pub enum StreamChunk {
     /// Text delta (streaming token)
     TextDelta(String),
-    /// Tool call started (id, name)
-    ToolStart { id: String, name: String },
-    /// Tool input delta (partial JSON)
+    /// Thinking block content (for models that support it)
+    ThinkingDelta(String),
+    /// Tool call detected (full tool call object)
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    /// Tool call input delta (partial JSON as it comes in)
     ToolInputDelta(String),
-    /// Tool call completed (full input JSON)
-    ToolEnd { id: String, name: String, input: String },
-    /// Usage statistics
-    Usage { input_tokens: u64, output_tokens: u64 },
-    /// Done marker
+    /// Usage statistics at end of response
+    Usage {
+        input_tokens: u64,
+        output_tokens: u64,
+    },
+    /// Done marker - response complete
     Done,
-    /// Error
+    /// Error occurred
     Error(String),
 }
 
@@ -118,27 +126,38 @@ impl model_provider for cli_provider {
                 base_cmd.contains("--yolo") ||
                 base_cmd.contains(" -y"); // space-y flag
 
-                if has_autonomous_flag {
-                    // Already has a flag, use as-is
-                    base_cmd.to_string()
-                } else {
-                    // Extract binary name (last component after / or space, or the whole string if no separators)
-                    let binary_name = base_cmd
-                        .split(['/', ' ', '\\'])
-                        .next_back()
-                        .unwrap_or(base_cmd)
-                        .to_lowercase();
+            if has_autonomous_flag {
+                // Already has a flag, use as-is
+                base_cmd.to_string()
+            } else {
+                // Extract binary name (last component after / or space, or the whole string if no separators)
+                let binary_name = base_cmd
+                    .split(['/', ' ', '\\'])
+                    .next_back()
+                    .unwrap_or(base_cmd)
+                    .to_lowercase();
 
-                    // Append appropriate autonomous flag based on binary name
-                    if binary_name.contains("codex") {
-                        format!("{} --full-auto", base_cmd)
-                    } else if binary_name.contains("claude") {
-                        format!("{} --dangerously-skip-permissions", base_cmd)
-                    } else {
-                        // qwen, gemini, opencode, and others default to --yolo
-                        format!("{} --yolo", base_cmd)
+                // Use exact matching against known autonomous binaries
+                // This prevents false positives like "not-claude" matching
+                let autonomous_flag = match binary_name.as_str() {
+                    "codex" | "codex-cli" => "--full-auto",
+                    "claude" | "claude-cli" | "claude-code" => "--dangerously-skip-permissions",
+                    "gemini" | "gemini-cli" | "google-gemini" => "-y",
+                    "qwen" | "qwen-cli" | "qwen-coder" => "--yolo",
+                    "opencode" | "opencode-cli" => "--yolo",
+                    // Default for unknown binaries - don't add any flag
+                    // User must explicitly include the flag in the binary path
+                    _ => {
+                        tracing::warn!("Unknown CLI binary '{}' for autonomous mode, not adding flags. Add flags manually if needed.", binary_name);
+                        return Err(anyhow::anyhow!(
+                            "Cannot enable autonomous mode for unknown binary '{}'. Autonomous mode requires known CLI binaries (claude, gemini, qwen, codex, opencode).",
+                            binary_name
+                        ));
                     }
-                }
+                };
+
+                format!("{} {}", base_cmd, autonomous_flag)
+            }
         } else {
             self.binary_path.clone()
         };
@@ -462,29 +481,85 @@ impl model_provider for openai_provider {
                 }
             };
 
-            let data: serde_json::Value = match res.json().await {
-                Ok(d) => d,
-                Err(e) => {
-                    let _ = tx.send(StreamChunk::Error(format!("parse error: {}", e))).await;
-                    return;
+            if !res.status().is_success() {
+                let body_text = res.text().await.unwrap_or_default();
+                let _ = tx.send(StreamChunk::Error(format!("API error: {}", body_text))).await;
+                return;
+            }
+
+            // True SSE streaming - parse the stream line by line
+            let mut buffer = Vec::new();
+            let mut current_tool_name: Option<String> = None;
+            let mut current_tool_input = String::new();
+
+            let mut stream = res.bytes_stream();
+
+            while let Some(chunk_result) = stream.next().await {
+                match chunk_result {
+                    Ok(bytes) => {
+                        for &byte in &bytes {
+                            if byte == b'\n' {
+                                let line = String::from_utf8_lossy(&buffer).to_string();
+                                buffer.clear();
+
+                                if line.starts_with("data:") {
+                                    let data_str = line.trim_start_matches("data:").trim();
+                                    if data_str == "[DONE]" {
+                                        let _ = tx.send(StreamChunk::Done).await;
+                                        return;
+                                    }
+                                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(data_str) {
+                                        // OpenAI chat completion chunk format
+                                        if let Some(choices) = data["choices"].as_array() {
+                                            for choice in choices {
+                                                if let Some(delta) = choice.get("delta").or_else(|| choice.get("message")) {
+                                                    // Text content
+                                                    if let Some(content) = delta.get("content") {
+                                                        if let Some(text) = content.as_str() {
+                                                            let _ = tx.send(StreamChunk::TextDelta(text.to_string())).await;
+                                                        }
+                                                    }
+                                                    // Tool calls (OpenAI function calling format)
+                                                    if let Some(tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+                                                        for tool_call in tool_calls {
+                                                            if let Some(func) = tool_call.get("function") {
+                                                                let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                                                                let arguments = func.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
+
+                                                                if !name.is_empty() && !arguments.is_empty() {
+                                                                    // Parse the JSON arguments
+                                                                    if let Ok(args_val) = serde_json::from_str::<serde_json::Value>(arguments) {
+                                                                        let _ = tx.send(StreamChunk::ToolUse {
+                                                                            id: tool_call.get("id").and_then(|i| i.as_str()).unwrap_or("tool_call").to_string(),
+                                                                            name,
+                                                                            input: args_val,
+                                                                        }).await;
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        // Usage in delta
+                                        if let Some(usage) = data.get("usage").and_then(|u| u.as_object()) {
+                                            let input_tokens = usage.get("prompt_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                                            let output_tokens = usage.get("completion_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                                            let _ = tx.send(StreamChunk::Usage { input_tokens, output_tokens }).await;
+                                        }
+                                    }
+                                }
+                            } else {
+                                buffer.push(byte);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(StreamChunk::Error(format!("stream error: {}", e))).await;
+                        return;
+                    }
                 }
-            };
-
-            let choices = match data["choices"].as_array() {
-                Some(c) if !c.is_empty() => c,
-                _ => {
-                    let _ = tx.send(StreamChunk::Error("no choices in response".into())).await;
-                    return;
-                }
-            };
-
-            let content = choices[0]["message"]["content"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-
-            for c in content.chars() {
-                let _ = tx.send(StreamChunk::TextDelta(c.to_string())).await;
             }
 
             let _ = tx.send(StreamChunk::Done).await;
@@ -818,10 +893,6 @@ impl model_provider for minimax_provider {
                                                 current_tool_id = data["index"].as_u64().map(|i| format!("tool_{}", i));
                                                 current_tool_name = block["name"].as_str().map(|s| s.to_string());
                                                 current_tool_input.clear();
-                                                
-                                                if let (Some(id), Some(name)) = (current_tool_id.clone(), current_tool_name.clone()) {
-                                                    let _ = tx.send(StreamChunk::ToolStart { id, name }).await;
-                                                }
                                             }
                                         }
                                     }
@@ -840,8 +911,14 @@ impl model_provider for minimax_provider {
                                         }
                                     }
                                     "content_block_stop" => {
+                                        // Emit ToolUse when the block is complete
                                         if let (Some(id), Some(name)) = (current_tool_id.clone(), current_tool_name.clone()) {
-                                            let _ = tx.send(StreamChunk::ToolEnd { id, name, input: current_tool_input.clone() }).await;
+                                            let input: serde_json::Value = if current_tool_input.is_empty() {
+                                                serde_json::Value::Object(serde_json::Map::new())
+                                            } else {
+                                                serde_json::from_str(&current_tool_input).unwrap_or(serde_json::Value::Object(serde_json::Map::new()))
+                                            };
+                                            let _ = tx.send(StreamChunk::ToolUse { id, name, input }).await;
                                         }
                                         current_tool_id = None;
                                         current_tool_name = None;
@@ -888,11 +965,9 @@ impl model_provider for minimax_provider {
                             if block["type"] == "tool_use" {
                                 let id = block["id"].as_str().unwrap_or("").to_string();
                                 let name = block["name"].as_str().unwrap_or("").to_string();
-                                let input = serde_json::to_string(&block["input"]).unwrap_or_default();
+                                let input = block["input"].clone();
                                 
-                                let _ = tx.send(StreamChunk::ToolStart { id: id.clone(), name: name.clone() }).await;
-                                let _ = tx.send(StreamChunk::ToolInputDelta(input.clone())).await;
-                                let _ = tx.send(StreamChunk::ToolEnd { id, name, input }).await;
+                                let _ = tx.send(StreamChunk::ToolUse { id, name, input }).await;
                             }
                         }
                     }
@@ -1045,29 +1120,75 @@ impl model_provider for openrouter_provider {
                 }
             };
 
-            let data: serde_json::Value = match res.json().await {
-                Ok(d) => d,
-                Err(e) => {
-                    let _ = tx.send(StreamChunk::Error(format!("parse error: {}", e))).await;
-                    return;
+            if !res.status().is_success() {
+                let body_text = res.text().await.unwrap_or_default();
+                let _ = tx.send(StreamChunk::Error(format!("API error: {}", body_text))).await;
+                return;
+            }
+
+            // True SSE streaming - parse the stream line by line
+            let mut buffer = Vec::new();
+            let mut stream = res.bytes_stream();
+
+            while let Some(chunk_result) = stream.next().await {
+                match chunk_result {
+                    Ok(bytes) => {
+                        for &byte in &bytes {
+                            if byte == b'\n' {
+                                let line = String::from_utf8_lossy(&buffer).to_string();
+                                buffer.clear();
+
+                                if line.starts_with("data:") {
+                                    let data_str = line.trim_start_matches("data:").trim();
+                                    if data_str == "[DONE]" {
+                                        let _ = tx.send(StreamChunk::Done).await;
+                                        return;
+                                    }
+                                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(data_str) {
+                                        // OpenAI-compatible chunk format (OpenRouter uses this)
+                                        if let Some(choices) = data["choices"].as_array() {
+                                            for choice in choices {
+                                                if let Some(delta) = choice.get("delta").or_else(|| choice.get("message")) {
+                                                    // Text content
+                                                    if let Some(content) = delta.get("content") {
+                                                        if let Some(text) = content.as_str() {
+                                                            let _ = tx.send(StreamChunk::TextDelta(text.to_string())).await;
+                                                        }
+                                                    }
+                                                    // Tool calls
+                                                    if let Some(tool_calls) = delta.get("tool_calls").and_then(|t| t.as_array()) {
+                                                        for tool_call in tool_calls {
+                                                            if let Some(func) = tool_call.get("function") {
+                                                                let name = func.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+                                                                let arguments = func.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
+
+                                                                if !name.is_empty() && !arguments.is_empty() {
+                                                                    if let Ok(args_val) = serde_json::from_str::<serde_json::Value>(arguments) {
+                                                                        let _ = tx.send(StreamChunk::ToolUse {
+                                                                            id: tool_call.get("id").and_then(|i| i.as_str()).unwrap_or("tool_call").to_string(),
+                                                                            name,
+                                                                            input: args_val,
+                                                                        }).await;
+                                                                    }
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                buffer.push(byte);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(StreamChunk::Error(format!("stream error: {}", e))).await;
+                        return;
+                    }
                 }
-            };
-
-            let choices = match data["choices"].as_array() {
-                Some(c) if !c.is_empty() => c,
-                _ => {
-                    let _ = tx.send(StreamChunk::Error("no choices in response".into())).await;
-                    return;
-                }
-            };
-
-            let content = choices[0]["message"]["content"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-
-            for c in content.chars() {
-                let _ = tx.send(StreamChunk::TextDelta(c.to_string())).await;
             }
 
             let _ = tx.send(StreamChunk::Done).await;
@@ -1200,29 +1321,100 @@ impl model_provider for anthropic_provider {
                 }
             };
 
-            let data: serde_json::Value = match res.json().await {
-                Ok(d) => d,
-                Err(e) => {
-                    let _ = tx.send(StreamChunk::Error(format!("parse error: {}", e))).await;
-                    return;
+            if !res.status().is_success() {
+                let body_text = res.text().await.unwrap_or_default();
+                let _ = tx.send(StreamChunk::Error(format!("API error: {}", body_text))).await;
+                return;
+            }
+
+            // True SSE streaming - parse the stream line by line
+            let mut buffer = Vec::new();
+            let mut current_tool_name: Option<String> = None;
+            let mut current_tool_input = String::new();
+            let mut stream = res.bytes_stream();
+
+            while let Some(chunk_result) = stream.next().await {
+                match chunk_result {
+                    Ok(bytes) => {
+                        for &byte in &bytes {
+                            if byte == b'\n' {
+                                let line = String::from_utf8_lossy(&buffer).to_string();
+                                buffer.clear();
+
+                                if line.starts_with("data:") {
+                                    let data_str = line.trim_start_matches("data:").trim();
+                                    if data_str == "[DONE]" {
+                                        let _ = tx.send(StreamChunk::Done).await;
+                                        return;
+                                    }
+                                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(data_str) {
+                                        let event_type = data["type"].as_str().unwrap_or("");
+                                        match event_type {
+                                            "content_block_start" => {
+                                                if let Some(block) = data["content_block"].as_object() {
+                                                    if block["type"] == "tool_use" {
+                                                        current_tool_name = block["name"].as_str().map(|s| s.to_string());
+                                                        current_tool_input.clear();
+                                                    }
+                                                }
+                                            }
+                                            "content_block_delta" => {
+                                                if let Some(delta) = data["delta"].as_object() {
+                                                    if delta["type"] == "input_json_delta" {
+                                                        if let Some(partial) = delta["partial_json"].as_str() {
+                                                            current_tool_input.push_str(partial);
+                                                            let _ = tx.send(StreamChunk::ToolInputDelta(partial.to_string())).await;
+                                                        }
+                                                    } else if delta["type"] == "text_delta" {
+                                                        if let Some(text) = delta["text"].as_str() {
+                                                            let _ = tx.send(StreamChunk::TextDelta(text.to_string())).await;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            "content_block_stop" => {
+                                                if let Some(name) = current_tool_name.take() {
+                                                    let input: serde_json::Value = if current_tool_input.is_empty() {
+                                                        serde_json::Value::Object(serde_json::Map::new())
+                                                    } else {
+                                                        serde_json::from_str(&current_tool_input).unwrap_or(serde_json::Value::Object(serde_json::Map::new()))
+                                                    };
+                                                    let _ = tx.send(StreamChunk::ToolUse {
+                                                        id: format!("tool_{}", chrono::Utc::now().timestamp_millis()),
+                                                        name,
+                                                        input,
+                                                    }).await;
+                                                }
+                                                current_tool_input.clear();
+                                            }
+                                            "message_delta" => {
+                                                if let Some(delta) = data["delta"].as_object() {
+                                                    if delta["type"] == "text_delta" {
+                                                        if let Some(text) = delta["text"].as_str() {
+                                                            let _ = tx.send(StreamChunk::TextDelta(text.to_string())).await;
+                                                        }
+                                                    }
+                                                }
+                                                if let Some(usage) = data["usage"].as_object() {
+                                                    let input_tokens = usage["input_tokens"].as_u64().unwrap_or(0);
+                                                    let output_tokens = usage["output_tokens"].as_u64().unwrap_or(0);
+                                                    let _ = tx.send(StreamChunk::Usage { input_tokens, output_tokens }).await;
+                                                }
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                            } else {
+                                buffer.push(byte);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        let _ = tx.send(StreamChunk::Error(format!("stream error: {}", e))).await;
+                        return;
+                    }
                 }
-            };
-
-            let content_arr = match data["content"].as_array() {
-                Some(c) if !c.is_empty() => c,
-                _ => {
-                    let _ = tx.send(StreamChunk::Error("no content in response".into())).await;
-                    return;
-                }
-            };
-
-            let content = content_arr[0]["text"]
-                .as_str()
-                .unwrap_or("")
-                .to_string();
-
-            for c in content.chars() {
-                let _ = tx.send(StreamChunk::TextDelta(c.to_string())).await;
             }
 
             let _ = tx.send(StreamChunk::Done).await;

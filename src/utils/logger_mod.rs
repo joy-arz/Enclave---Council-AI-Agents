@@ -55,6 +55,10 @@ pub enum LogEvent {
     error { timestamp: String, error: String },
     #[allow(dead_code)]
     info { timestamp: String, message: String },
+    // Context management events
+    context_warning { message: String },
+    context_compaction { phase: String, message: String, messages_summarized: usize },
+    busy_state_changed { state: String },
 }
 
 #[allow(non_camel_case_types)]
@@ -189,5 +193,30 @@ impl session_logger {
     /// Helper to get max_rounds from orchestrator context (approximate)
     fn max_rounds_for_log(&self) -> usize {
         7 // Default, will be set via log_judge_decision if needed
+    }
+
+    /// Log context warning (e.g., approaching token limit)
+    pub async fn log_context_warning(&self, message: &str) -> tokio::io::Result<()> {
+        self.log_event(LogEvent::context_warning {
+            message: message.to_string(),
+        }).await?;
+        self.log(&format!("[context warning] {}", message)).await
+    }
+
+    /// Log context compaction (summarization)
+    pub async fn log_context_compaction(&self, phase: &str, message: &str, messages_summarized: usize) -> tokio::io::Result<()> {
+        self.log_event(LogEvent::context_compaction {
+            phase: phase.to_string(),
+            message: message.to_string(),
+            messages_summarized,
+        }).await?;
+        self.log(&format!("[context compaction] {}: {} ({} messages summarized)", phase, message, messages_summarized)).await
+    }
+
+    /// Log busy state change
+    pub async fn log_busy_state(&self, state: &str) -> tokio::io::Result<()> {
+        self.log_event(LogEvent::busy_state_changed {
+            state: state.to_string(),
+        }).await
     }
 }

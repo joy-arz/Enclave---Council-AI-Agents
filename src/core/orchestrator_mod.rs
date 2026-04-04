@@ -88,7 +88,7 @@ impl orchestrator {
         self.workspace_dir.join(".enclave_state.md")
     }
 
-    pub async fn run_council<F, Fut>(&self, query: &str, mut on_message: F) -> Result<String, anyhow::Error>
+    pub async fn run_council<F, Fut>(&mut self, query: &str, mut on_message: F) -> Result<String, anyhow::Error>
     where
         F: FnMut(agent_response) -> Fut,
         Fut: std::future::Future<Output = Result<(), ()>>,
@@ -136,7 +136,7 @@ impl orchestrator {
             let _ = self.logger.log_round_start(round).await;
 
             // sequential phase: the strategist always sets the baseline
-            let strategist = &self.agents[0];
+            let strategist = &mut self.agents[0];
             let history = self.memory.lock().await.get_formatted_history();
 
             let _ = self.logger.log(&format!("asking {}...", strategist.name)).await;
@@ -187,14 +187,14 @@ impl orchestrator {
             let mut set = JoinSet::new();
             let history = self.memory.lock().await.get_formatted_history();
 
-            for agent in self.agents.iter().skip(1) {
-                let agent_arc = Arc::new(agent.clone_for_parallel());
+            for agent in self.agents.iter_mut().skip(1) {
+                let mut agent_clone = agent.clone_for_parallel();
                 let history_clone = history.clone();
                 let logger_arc = self.logger.clone();
                 set.spawn(async move {
-                    let _ = logger_arc.log(&format!("asking {} in parallel...", agent_arc.name)).await;
-                    let res = agent_arc.get_response_with_tools(&history_clone).await;
-                    (agent_arc.name.clone(), res)
+                    let _ = logger_arc.log(&format!("asking {} in parallel...", agent_clone.name)).await;
+                    let res = agent_clone.get_response_with_tools(&history_clone).await;
+                    (agent_clone.name.clone(), res)
                 });
             }
 
@@ -241,6 +241,23 @@ impl orchestrator {
                     let _ = self.logger.log("client disconnected. aborting enclave.").await;
                     return Err(anyhow::anyhow!("client disconnected"));
                 }
+            }
+
+            // Context management: check if we need to compact/summarize
+            let msg_count = {
+                let mem = self.memory.lock().await;
+                mem.messages.len() + mem.pinned_messages.len()
+            };
+            // If we have more than 30 messages, summarize the oldest ones
+            if msg_count > 30 {
+                let _ = self.logger.log_context_warning(&format!("message count ({}) exceeds threshold, triggering summarization", msg_count)).await;
+                // For now, just log the compaction event - actual summarization would call an LLM
+                // This is a placeholder for actual summarization logic
+                let _ = self.logger.log_context_compaction(
+                    "round_end",
+                    &format!("would summarize oldest {} messages", msg_count - 20),
+                    msg_count - 20
+                ).await;
             }
 
             // check if we should continue or stop

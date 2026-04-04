@@ -45,6 +45,10 @@ The system uses a structured deliberation process where different specialized ag
 - **Real-Time Streaming**: Watch the enclave's deliberation and file edits in real-time via SSE.
 - **Graceful Shutdown**: Server shuts down cleanly on Ctrl+C, completing in-flight requests.
 - **SSE Streaming**: True Server-Sent Events streaming for real-time AI output and tool execution feedback.
+- **Hierarchical Sessions**: Parent-child session relationships with context inheritance.
+- **Infinite Loop Protection**: Automatic detection and prevention of repeated tool call failures.
+- **Wildcard Permission Patterns**: Fine-grained tool execution control with patterns like `execute_bash:git *`.
+- **BusyState Tracking**: Real-time UI state tracking (Idle, Thinking, Streaming, ToolRunning, ApprovalPending, Error).
 
 ---
 
