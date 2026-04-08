@@ -113,7 +113,7 @@ WSL provides the best experience as Enclave is built for Unix-like systems.
 
 3. **Clone and build**:
    ```bash
-   git clone <repository-url>
+   git clone https://github.com/joy-arz/Enclave---Council-AI-Agents.git
    cd enclave
    cargo build --release
    ```
