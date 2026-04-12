@@ -886,7 +886,7 @@ impl model_provider for minimax_provider {
                                 match event_type {
                                     "content_block_start" => {
                                         if let Some(block) = data["content_block"].as_object() {
-                                            if block["type"] == "tool_use" {
+                                            if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
                                                 current_tool_id = data["index"].as_u64().map(|i| format!("tool_{}", i));
                                                 current_tool_name = block["name"].as_str().map(|s| s.to_string());
                                                 current_tool_input.clear();
@@ -895,12 +895,12 @@ impl model_provider for minimax_provider {
                                     }
                                     "content_block_delta" => {
                                         if let Some(delta) = data["delta"].as_object() {
-                                            if delta["type"] == "input_json_delta" {
+                                            if delta.get("type").and_then(|v| v.as_str()) == Some("input_json_delta") {
                                                 if let Some(partial) = delta["partial_json"].as_str() {
                                                     current_tool_input.push_str(partial);
                                                     let _ = tx.send(StreamChunk::ToolInputDelta(partial.to_string())).await;
                                                 }
-                                            } else if delta["type"] == "text_delta" {
+                                            } else if delta.get("type").and_then(|v| v.as_str()) == Some("text_delta") {
                                                 if let Some(text) = delta["text"].as_str() {
                                                     let _ = tx.send(StreamChunk::TextDelta(text.to_string())).await;
                                                 }
@@ -923,7 +923,7 @@ impl model_provider for minimax_provider {
                                     }
                                     "message_delta" => {
                                         if let Some(delta) = data["delta"].as_object() {
-                                            if delta["type"] == "text_delta" {
+                                            if delta.get("type").and_then(|v| v.as_str()) == Some("text_delta") {
                                                 if let Some(text) = delta["text"].as_str() {
                                                     let _ = tx.send(StreamChunk::TextDelta(text.to_string())).await;
                                                 }
@@ -959,7 +959,7 @@ impl model_provider for minimax_provider {
                     // Extract tool calls
                     if let Some(content_arr) = data["content"].as_array() {
                         for block in content_arr {
-                            if block["type"] == "tool_use" {
+                            if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
                                 let id = block["id"].as_str().unwrap_or("").to_string();
                                 let name = block["name"].as_str().unwrap_or("").to_string();
                                 let input = block["input"].clone();
@@ -1347,7 +1347,7 @@ impl model_provider for anthropic_provider {
                                         match event_type {
                                             "content_block_start" => {
                                                 if let Some(block) = data["content_block"].as_object() {
-                                                    if block["type"] == "tool_use" {
+                                                    if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
                                                         current_tool_name = block["name"].as_str().map(|s| s.to_string());
                                                         current_tool_input.clear();
                                                     }
@@ -1355,12 +1355,12 @@ impl model_provider for anthropic_provider {
                                             }
                                             "content_block_delta" => {
                                                 if let Some(delta) = data["delta"].as_object() {
-                                                    if delta["type"] == "input_json_delta" {
+                                                    if delta.get("type").and_then(|v| v.as_str()) == Some("input_json_delta") {
                                                         if let Some(partial) = delta["partial_json"].as_str() {
                                                             current_tool_input.push_str(partial);
                                                             let _ = tx.send(StreamChunk::ToolInputDelta(partial.to_string())).await;
                                                         }
-                                                    } else if delta["type"] == "text_delta" {
+                                                    } else if delta.get("type").and_then(|v| v.as_str()) == Some("text_delta") {
                                                         if let Some(text) = delta["text"].as_str() {
                                                             let _ = tx.send(StreamChunk::TextDelta(text.to_string())).await;
                                                         }
@@ -1384,7 +1384,7 @@ impl model_provider for anthropic_provider {
                                             }
                                             "message_delta" => {
                                                 if let Some(delta) = data["delta"].as_object() {
-                                                    if delta["type"] == "text_delta" {
+                                                    if delta.get("type").and_then(|v| v.as_str()) == Some("text_delta") {
                                                         if let Some(text) = delta["text"].as_str() {
                                                             let _ = tx.send(StreamChunk::TextDelta(text.to_string())).await;
                                                         }

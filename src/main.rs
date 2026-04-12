@@ -1,28 +1,28 @@
 mod agents;
-mod core;
 mod api;
-mod utils;
 mod cli;
+mod core;
+mod utils;
 
-use std::sync::Arc;
 use axum::{
     routing::{get, post},
     Router,
 };
-use tower_http::services::ServeDir;
-use tower_http::cors::CorsLayer;
 use clap::Parser;
+use std::sync::Arc;
+use tower_http::cors::CorsLayer;
+use tower_http::services::ServeDir;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::utils::config;
+use crate::agents::{judge::judge_agent, roles};
+use crate::api::rate_limit::IpRateLimiter;
+use crate::api::session_store;
 use crate::cli::cli_args;
 use crate::core::orchestrator;
-use crate::core::providers_mod::{cli_provider, model_provider};
-use crate::agents::{roles, judge::judge_agent};
-use crate::api::session_store;
-use crate::api::rate_limit::IpRateLimiter;
-use crate::utils::logger_mod::session_logger;
+use crate::core::providers_mod::factory;
+use crate::utils::config;
 use crate::utils::constants::{RATE_LIMIT_MAX_TOKENS, RATE_LIMIT_REFILL_RATE};
+use crate::utils::logger_mod::session_logger;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -36,12 +36,12 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let args = cli_args::parse();
     let mut cfg = config::from_env()?;
-    
+
     // override workspace if provided via cli
     if let Some(ws) = args.workspace.clone() {
         cfg.workspace_dir = ws;
     }
-    
+
     let cfg_arc = Arc::new(cfg);
     let store = Arc::new(session_store::new(cfg_arc.workspace_dir.clone()));
 
@@ -54,18 +54,30 @@ async fn main() -> Result<(), anyhow::Error> {
 
 async fn run_server(cfg: Arc<config>, store: Arc<session_store>) -> Result<(), anyhow::Error> {
     // Create rate limiter for API protection
-    let rate_limiter = Arc::new(IpRateLimiter::new(RATE_LIMIT_MAX_TOKENS, RATE_LIMIT_REFILL_RATE));
+    let rate_limiter = Arc::new(IpRateLimiter::new(
+        RATE_LIMIT_MAX_TOKENS,
+        RATE_LIMIT_REFILL_RATE,
+    ));
 
     let app = Router::new()
         .route("/api/enclave", get(api::handle_enclave))
         .route("/api/browse", get(api::routes::browse_workspace))
         .route("/api/test_cli", post(api::routes::test_cli))
         .route("/api/apply", post(api::routes::apply_change))
-        .route("/api/history/:session_id", get(api::routes::get_session_history))
+        .route(
+            "/api/history/:session_id",
+            get(api::routes::get_session_history),
+        )
         .route("/api/sessions", get(api::routes::list_sessions))
-        .route("/api/sessions/:session_id", axum::routing::delete(api::routes::delete_session))
+        .route(
+            "/api/sessions/:session_id",
+            axum::routing::delete(api::routes::delete_session),
+        )
         .nest_service("/static", ServeDir::new("src/ui"))
-        .route("/", get(|| async { axum::response::Html(include_str!("ui/index.html")) }))
+        .route(
+            "/",
+            get(|| async { axum::response::Html(include_str!("ui/index.html")) }),
+        )
         .with_state((cfg.clone(), store.clone(), rate_limiter.clone()))
         .layer(CorsLayer::permissive());
 
@@ -77,20 +89,27 @@ async fn run_server(cfg: Arc<config>, store: Arc<session_store>) -> Result<(), a
     let shutdown_signal = async {
         match tokio::signal::ctrl_c().await {
             Ok(_) => tracing::info!("shutdown signal received, stopping server..."),
-            Err(e) => tracing::warn!("failed to install signal handler: {}, continuing anyway...", e),
+            Err(e) => tracing::warn!(
+                "failed to install signal handler: {}, continuing anyway...",
+                e
+            ),
         }
     };
 
     // Add timeout to graceful shutdown
     let shutdown_result = tokio::time::timeout(
         std::time::Duration::from_secs(crate::utils::constants::SHUTDOWN_TIMEOUT_SECS),
-        axum::serve(listener, app).with_graceful_shutdown(shutdown_signal)
-    ).await;
+        axum::serve(listener, app).with_graceful_shutdown(shutdown_signal),
+    )
+    .await;
 
     match shutdown_result {
         Ok(Ok(())) => tracing::info!("server stopped gracefully"),
         Ok(Err(e)) => tracing::error!("server error: {}", e),
-        Err(_) => tracing::warn!("shutdown timed out after {} seconds, forcing exit", crate::utils::constants::SHUTDOWN_TIMEOUT_SECS),
+        Err(_) => tracing::warn!(
+            "shutdown timed out after {} seconds, forcing exit",
+            crate::utils::constants::SHUTDOWN_TIMEOUT_SECS
+        ),
     }
 
     tracing::info!("server stopped");
@@ -119,27 +138,87 @@ async fn run_cli(cfg: Arc<config>, args: cli_args) -> Result<(), anyhow::Error> 
     let ws = cfg.workspace_dir.clone();
     let logger = Arc::new(session_logger::new(ws.clone()));
 
-    let strategist_provider: Arc<dyn model_provider> = Arc::new(cli_provider::new(cfg.strategist_binary.clone(), ws.clone()).with_logger(logger.clone()));
-    let critic_provider: Arc<dyn model_provider> = Arc::new(cli_provider::new(cfg.critic_binary.clone(), ws.clone()).with_logger(logger.clone()));
-    let optimizer_provider: Arc<dyn model_provider> = Arc::new(cli_provider::new(cfg.optimizer_binary.clone(), ws.clone()).with_logger(logger.clone()));
-    let contrarian_provider: Arc<dyn model_provider> = Arc::new(cli_provider::new(cfg.contrarian_binary.clone(), ws.clone()).with_logger(logger.clone()));
-    let judge_provider: Arc<dyn model_provider> = Arc::new(cli_provider::new(cfg.judge_binary.clone(), ws.clone()).with_logger(logger.clone()));
+    let strategist_provider = factory::create_provider(
+        &cfg.strategist_binary,
+        ws.clone(),
+        cfg.minimax_api_key.clone(),
+        Some(cfg.minimax_model.clone()),
+        Some(cfg.minimax_base_url.clone()),
+        cfg.autonomous_mode,
+    );
+    let critic_provider = factory::create_provider(
+        &cfg.critic_binary,
+        ws.clone(),
+        cfg.minimax_api_key.clone(),
+        Some(cfg.minimax_model.clone()),
+        Some(cfg.minimax_base_url.clone()),
+        cfg.autonomous_mode,
+    );
+    let optimizer_provider = factory::create_provider(
+        &cfg.optimizer_binary,
+        ws.clone(),
+        cfg.minimax_api_key.clone(),
+        Some(cfg.minimax_model.clone()),
+        Some(cfg.minimax_base_url.clone()),
+        cfg.autonomous_mode,
+    );
+    let contrarian_provider = factory::create_provider(
+        &cfg.contrarian_binary,
+        ws.clone(),
+        cfg.minimax_api_key.clone(),
+        Some(cfg.minimax_model.clone()),
+        Some(cfg.minimax_base_url.clone()),
+        cfg.autonomous_mode,
+    );
+    let judge_provider = factory::create_provider(
+        &cfg.judge_binary,
+        ws.clone(),
+        cfg.minimax_api_key.clone(),
+        Some(cfg.minimax_model.clone()),
+        Some(cfg.minimax_base_url.clone()),
+        cfg.autonomous_mode,
+    );
 
-    let agents = vec![
-        roles::strategist(strategist_provider, "cli", cfg.default_temperature, cfg.max_tokens_per_agent),
-        roles::critic(critic_provider, "cli", cfg.default_temperature, cfg.max_tokens_per_agent),
-        roles::optimizer(optimizer_provider, "cli", cfg.default_temperature, cfg.max_tokens_per_agent),
-        roles::contrarian(contrarian_provider, "cli", cfg.default_temperature, cfg.max_tokens_per_agent),
+    let mut agents = vec![
+        roles::strategist(
+            strategist_provider,
+            "cli",
+            cfg.default_temperature,
+            cfg.max_tokens_per_agent,
+        ),
+        roles::critic(
+            critic_provider,
+            "cli",
+            cfg.default_temperature,
+            cfg.max_tokens_per_agent,
+        ),
+        roles::optimizer(
+            optimizer_provider,
+            "cli",
+            cfg.default_temperature,
+            cfg.max_tokens_per_agent,
+        ),
+        roles::contrarian(
+            contrarian_provider,
+            "cli",
+            cfg.default_temperature,
+            cfg.max_tokens_per_agent,
+        ),
     ];
+
+    // Set autonomous mode on all agents based on config
+    for agent in &mut agents {
+        agent.set_autonomous(cfg.autonomous_mode);
+    }
     let judge = judge_agent::new(judge_provider, "cli", cfg.default_temperature, 1000);
 
     let mut orchestrator_inst = orchestrator::new(
         agents,
         judge,
         args.rounds.unwrap_or(cfg.max_rounds),
-        false, // auto_rounds - disabled for CLI mode
+        cfg.autonomous_mode, // auto_rounds based on autonomous mode
         20,
-        ws
+        ws,
     );
     orchestrator_inst.logger = logger;
 
@@ -147,12 +226,14 @@ async fn run_cli(cfg: Arc<config>, args: cli_args) -> Result<(), anyhow::Error> 
     println!("workspace: {}\n", cfg.workspace_dir.display());
     println!("query: {}\n", query);
 
-    orchestrator_inst.run_council(&query, |resp| async move {
-        println!("[{}] (round {}):", resp.agent, resp.round);
-        println!("{}\n", resp.content);
-        println!("{}", "-".repeat(40));
-        Ok(())
-    }).await?;
+    orchestrator_inst
+        .run_council(&query, |resp| async move {
+            println!("[{}] (round {}):", resp.agent, resp.round);
+            println!("{}\n", resp.content);
+            println!("{}", "-".repeat(40));
+            Ok(())
+        })
+        .await?;
 
     Ok(())
 }

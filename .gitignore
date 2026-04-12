@@ -7,6 +7,7 @@
 last_session_log.md
 **/*.rs.bk
 .DS_Store
+.MAINTENANCE.md
 # Added dynamically
 *.jsonl
 last_session_log.jsonl

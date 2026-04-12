@@ -1,5 +1,7 @@
 //! Tool system for agent execution
-//! Implements MCP-style tools for workspace interaction
+//! Implements tools for workspace interaction including MCP support
+
+pub mod mcp_client;
 
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -43,7 +45,7 @@ pub struct ToolParam {
 /// Get all available tool definitions
 #[allow(dead_code)]
 pub fn get_tool_definitions() -> Vec<ToolDefinition> {
-    vec![
+    let mut tools = vec![
         ToolDefinition {
             name: "read_file".to_string(),
             description: "Read the contents of a file from the workspace".to_string(),
@@ -92,7 +94,8 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
             parameters: vec![
                 ToolParam {
                     name: "command".to_string(),
-                    description: "Shell command to execute (e.g., 'ls -la', 'cargo build')".to_string(),
+                    description: "Shell command to execute (e.g., 'ls -la', 'cargo build')"
+                        .to_string(),
                     param_type: "string".to_string(),
                     required: true,
                 },
@@ -107,14 +110,12 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: "list_directory".to_string(),
             description: "List contents of a directory".to_string(),
-            parameters: vec![
-                ToolParam {
-                    name: "path".to_string(),
-                    description: "Relative path to directory (default: '.')".to_string(),
-                    param_type: "string".to_string(),
-                    required: false,
-                },
-            ],
+            parameters: vec![ToolParam {
+                name: "path".to_string(),
+                description: "Relative path to directory (default: '.')".to_string(),
+                param_type: "string".to_string(),
+                required: false,
+            }],
         },
         ToolDefinition {
             name: "grep".to_string(),
@@ -140,7 +141,13 @@ pub fn get_tool_definitions() -> Vec<ToolDefinition> {
                 },
             ],
         },
-    ]
+    ];
+
+    // Add MCP tools from configured servers
+    let mcp_tools = mcp_client::get_mcp_tool_definitions();
+    tools.extend(mcp_tools);
+
+    tools
 }
 
 /// Convert tool definitions to JSON for system prompt
@@ -153,15 +160,22 @@ pub fn get_tools_json() -> String {
         if i > 0 {
             json.push_str(",\n");
         }
-        json.push_str(&format!("{{ \"name\": \"{}\", \"description\": \"{}\", \"input_schema\": {{", tool.name, tool.description));
-        
-        let params: Vec<String> = tool.parameters.iter().map(|param| {
-            format!(
-                "\"{}\": {{ \"type\": \"{}\", \"description\": \"{}\", \"required\": {} }}",
-                param.name, param.param_type, param.description, param.required
-            )
-        }).collect();
-        
+        json.push_str(&format!(
+            "{{ \"name\": \"{}\", \"description\": \"{}\", \"input_schema\": {{",
+            tool.name, tool.description
+        ));
+
+        let params: Vec<String> = tool
+            .parameters
+            .iter()
+            .map(|param| {
+                format!(
+                    "\"{}\": {{ \"type\": \"{}\", \"description\": \"{}\", \"required\": {} }}",
+                    param.name, param.param_type, param.description, param.required
+                )
+            })
+            .collect();
+
         json.push_str(&params.join(", "));
         json.push_str("}}");
         json.push('}');
@@ -187,7 +201,11 @@ pub async fn execute_tool(
             name: name.clone(),
             success: false,
             output: String::new(),
-            error: Some(format!("Tool argument too large ({} bytes, max {}). Refusing to execute.", args_size, crate::utils::constants::MAX_TOOL_ARGUMENT_SIZE)),
+            error: Some(format!(
+                "Tool argument too large ({} bytes, max {}). Refusing to execute.",
+                args_size,
+                crate::utils::constants::MAX_TOOL_ARGUMENT_SIZE
+            )),
         };
     }
 
@@ -224,18 +242,30 @@ pub async fn execute_tool(
         "run_shell_command" => execute_shell_command(args, workspace_dir).await,
         "list_directory" => execute_list_directory(args, workspace_dir).await,
         "grep" => execute_grep(args, workspace_dir).await,
-        _ => ToolResult {
-            name: name.clone(),
-            success: false,
-            output: String::new(),
-            error: Some(format!("Unknown tool: {}", name)),
-        },
+        _ => {
+            // Check if this is an MCP tool call (format: mcp__server__tool)
+            if let Some(mcp_result) =
+                mcp_client::execute_mcp_tool_matching(name, args, workspace_dir)
+            {
+                return mcp_result;
+            }
+            ToolResult {
+                name: name.clone(),
+                success: false,
+                output: String::new(),
+                error: Some(format!("Unknown tool: {}", name)),
+            }
+        }
     }
 }
 
-async fn execute_read_file(args: &serde_json::Value, workspace_dir: &std::path::Path) -> ToolResult {
+async fn execute_read_file(
+    args: &serde_json::Value,
+    workspace_dir: &std::path::Path,
+) -> ToolResult {
     // Accept both "path" and "absolute_path"
-    let path = args.get("path")
+    let path = args
+        .get("path")
         .or_else(|| args.get("absolute_path"))
         .and_then(|v| v.as_str());
 
@@ -264,7 +294,7 @@ async fn execute_read_file(args: &serde_json::Value, workspace_dir: &std::path::
             error: Some("Security violation: absolute paths not allowed".to_string()),
         };
     }
-    
+
     // Check for path traversal attempts
     if path_obj.components().any(|c| c.as_os_str() == "..") {
         return ToolResult {
@@ -276,7 +306,7 @@ async fn execute_read_file(args: &serde_json::Value, workspace_dir: &std::path::
     }
 
     let full_path = workspace_dir.join(path);
-    
+
     // Canonicalize and verify path stays within workspace
     let resolved_path = match full_path.canonicalize() {
         Ok(p) => p,
@@ -297,7 +327,7 @@ async fn execute_read_file(args: &serde_json::Value, workspace_dir: &std::path::
             };
         }
     };
-    
+
     let workspace_resolved = match workspace_dir.canonicalize() {
         Ok(p) => p,
         Err(e) => {
@@ -309,7 +339,7 @@ async fn execute_read_file(args: &serde_json::Value, workspace_dir: &std::path::
             };
         }
     };
-    
+
     if !resolved_path.starts_with(&workspace_resolved) {
         return ToolResult {
             name: "read_file".to_string(),
@@ -327,8 +357,13 @@ async fn execute_read_file(args: &serde_json::Value, workspace_dir: &std::path::
             let end = (offset + limit).min(lines.len());
             let selected: Vec<String> = lines[start..end].iter().map(|s| s.to_string()).collect();
             let output = if total_lines > limit {
-                format!("[Showing lines {}-{} of {}]\n\n{}",
-                    start + 1, end, total_lines, selected.join("\n"))
+                format!(
+                    "[Showing lines {}-{} of {}]\n\n{}",
+                    start + 1,
+                    end,
+                    total_lines,
+                    selected.join("\n")
+                )
             } else {
                 selected.join("\n")
             };
@@ -348,7 +383,10 @@ async fn execute_read_file(args: &serde_json::Value, workspace_dir: &std::path::
     }
 }
 
-async fn execute_write_file(args: &serde_json::Value, workspace_dir: &std::path::Path) -> ToolResult {
+async fn execute_write_file(
+    args: &serde_json::Value,
+    workspace_dir: &std::path::Path,
+) -> ToolResult {
     let path = match args.get("path").and_then(|v| v.as_str()) {
         Some(p) => p,
         None => {
@@ -361,7 +399,7 @@ async fn execute_write_file(args: &serde_json::Value, workspace_dir: &std::path:
         }
     };
 
-    let content = match args.get("content").and_then(|v| v.as_str()) {
+    let content_raw = match args.get("content").and_then(|v| v.as_str()) {
         Some(c) => c,
         None => {
             return ToolResult {
@@ -373,6 +411,17 @@ async fn execute_write_file(args: &serde_json::Value, workspace_dir: &std::path:
         }
     };
 
+    // Unescape common escape sequences that may come from LLM output
+    // e.g., "\n" -> actual newline, "\\n" -> "\n", etc.
+    let content_unescaped = content_raw
+        .replace("\\n", "\n")
+        .replace("\\t", "\t")
+        .replace("\\r", "\r")
+        .replace("\\\"", "\"")
+        .replace("\\\\", "\\");
+
+    let content_for_write = content_unescaped.as_str();
+
     // Security: reject absolute paths and path traversal attempts
     let path_obj = std::path::Path::new(path);
     if path_obj.is_absolute() {
@@ -383,7 +432,7 @@ async fn execute_write_file(args: &serde_json::Value, workspace_dir: &std::path:
             error: Some("Security violation: absolute paths not allowed".to_string()),
         };
     }
-    
+
     if path_obj.components().any(|c| c.as_os_str() == "..") {
         return ToolResult {
             name: "write_file".to_string(),
@@ -415,7 +464,7 @@ async fn execute_write_file(args: &serde_json::Value, workspace_dir: &std::path:
             // by checking the workspace prefix
             workspace_dir.join(parent)
         };
-        
+
         let workspace_resolved = match workspace_dir.canonicalize() {
             Ok(p) => p,
             Err(e) => {
@@ -427,7 +476,7 @@ async fn execute_write_file(args: &serde_json::Value, workspace_dir: &std::path:
                 };
             }
         };
-        
+
         if !parent_resolved.starts_with(&workspace_resolved) {
             return ToolResult {
                 name: "write_file".to_string(),
@@ -436,7 +485,7 @@ async fn execute_write_file(args: &serde_json::Value, workspace_dir: &std::path:
                 error: Some("Security violation: path escapes workspace".to_string()),
             };
         }
-        
+
         if !parent.exists() {
             if let Err(e) = fs::create_dir_all(parent).await {
                 return ToolResult {
@@ -449,11 +498,15 @@ async fn execute_write_file(args: &serde_json::Value, workspace_dir: &std::path:
         }
     }
 
-    match fs::write(&full_path, content).await {
+    match fs::write(&full_path, content_for_write).await {
         Ok(_) => ToolResult {
             name: "write_file".to_string(),
             success: true,
-            output: format!("Successfully wrote {} bytes to {}", content.len(), path),
+            output: format!(
+                "Successfully wrote {} bytes to {}",
+                content_for_write.len(),
+                path
+            ),
             error: None,
         },
         Err(e) => ToolResult {
@@ -499,10 +552,11 @@ fn is_command_dangerous(command: &str) -> Option<&'static str> {
         }
     }
     // Also check for attempts to access sensitive paths
-    if command.contains("/etc/passwd") || 
-       command.contains("/etc/shadow") ||
-       command.contains("~/.ssh") ||
-       command.contains("/root/") {
+    if command.contains("/etc/passwd")
+        || command.contains("/etc/shadow")
+        || command.contains("~/.ssh")
+        || command.contains("/root/")
+    {
         return Some("sensitive path access");
     }
     None
@@ -533,21 +587,22 @@ async fn execute_shell_command(args: &serde_json::Value, workspace_dir: &PathBuf
 
     // Use configurable timeout, capped at max
     let max_timeout = crate::utils::constants::SHELL_TIMEOUT_SECS;
-    let timeout_secs = args.get("timeout")
+    let timeout_secs = args
+        .get("timeout")
         .and_then(|v| v.as_u64())
         .map(|t| t.min(max_timeout))
         .unwrap_or(max_timeout);
 
     let mut cmd = Command::new("sh");
-    cmd.arg("-c")
-       .arg(command)
-       .current_dir(workspace_dir);
-    
+    cmd.arg("-c").arg(command).current_dir(workspace_dir);
+
     // Execute with timeout
     let output = match tokio::time::timeout(
         std::time::Duration::from_secs(timeout_secs),
-        cmd.output()
-    ).await {
+        cmd.output(),
+    )
+    .await
+    {
         Ok(Ok(out)) => out,
         Ok(Err(e)) => {
             return ToolResult {
@@ -583,10 +638,18 @@ async fn execute_shell_command(args: &serde_json::Value, workspace_dir: &PathBuf
         out_str
     };
 
-    let out_str = format!("{}{} exited with code {}",
+    let out_str = format!(
+        "{}{} exited with code {}",
         out_str,
-        if status.success() { "Command succeeded" } else { "Command failed" },
-        status.code().map(|c: i32| c.to_string()).unwrap_or_else(|| "unknown".to_string())
+        if status.success() {
+            "Command succeeded"
+        } else {
+            "Command failed"
+        },
+        status
+            .code()
+            .map(|c: i32| c.to_string())
+            .unwrap_or_else(|| "unknown".to_string())
     );
 
     ToolResult {
@@ -599,7 +662,8 @@ async fn execute_shell_command(args: &serde_json::Value, workspace_dir: &PathBuf
 
 async fn execute_list_directory(args: &serde_json::Value, workspace_dir: &PathBuf) -> ToolResult {
     // Accept both "path" and "absolute_path"
-    let path = args.get("path")
+    let path = args
+        .get("path")
         .or_else(|| args.get("absolute_path"))
         .and_then(|v| v.as_str())
         .unwrap_or(".");
@@ -648,8 +712,8 @@ async fn execute_list_directory(args: &serde_json::Value, workspace_dir: &PathBu
     // Use -- to prevent option injection (path can't start with -)
     let mut cmd = Command::new("ls");
     cmd.arg("-la");
-    cmd.arg("--");  // Separator - everything after is a path, not an option
-    cmd.arg(path);  // Use original path since we validated above
+    cmd.arg("--"); // Separator - everything after is a path, not an option
+    cmd.arg(path); // Use original path since we validated above
     cmd.current_dir(workspace_dir);
 
     let output = cmd.output().await;
@@ -660,7 +724,11 @@ async fn execute_list_directory(args: &serde_json::Value, workspace_dir: &PathBu
             ToolResult {
                 name: "list_directory".to_string(),
                 success: true,
-                output: if stdout.is_empty() { "(empty directory)".to_string() } else { stdout.to_string() },
+                output: if stdout.is_empty() {
+                    "(empty directory)".to_string()
+                } else {
+                    stdout.to_string()
+                },
                 error: None,
             }
         }
@@ -687,7 +755,10 @@ async fn execute_grep(args: &serde_json::Value, workspace_dir: &PathBuf) -> Tool
     };
 
     let path = args.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-    let file_pattern = args.get("file_pattern").and_then(|v| v.as_str()).unwrap_or("*");
+    let file_pattern = args
+        .get("file_pattern")
+        .and_then(|v| v.as_str())
+        .unwrap_or("*");
 
     let mut cmd = Command::new("grep");
     cmd.arg("-rn");

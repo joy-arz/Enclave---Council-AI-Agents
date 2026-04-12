@@ -1,10 +1,210 @@
-use std::sync::Arc;
-use std::path::PathBuf;
+use crate::core::approval::ApprovalPolicy;
 use crate::core::model_provider;
 use crate::core::providers_mod::StreamChunk;
 use crate::core::tools::execute_tool;
 use crate::core::BusyState;
-use crate::core::approval::ApprovalPolicy;
+use regex::Regex;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+/// Parse tool calls from text content as a fallback for APIs that don't send proper tool_use events
+/// Handles multiple formats including MiniMax's pseudo-JSON with nested braces
+fn parse_tool_calls_from_text(text: &str) -> Vec<(String, String)> {
+    let mut tool_calls = Vec::new();
+
+    // Try to find complete tool call objects in the text
+    // Match [TOOL_CALL] blocks - end is marked by [/TOOL_CALL]
+    let mut search_start = 0;
+    while let Some(tool_start) = text[search_start..].find("[TOOL_CALL]") {
+        let abs_tool_start = search_start + tool_start;
+        let after_tool_call = &text[abs_tool_start + 10..];
+
+        // Find the closing [/TOOL_CALL] as the delimiter
+        let block_end = after_tool_call
+            .find("[/TOOL_CALL]")
+            .unwrap_or(after_tool_call.len());
+
+        let block_content = &after_tool_call[..block_end];
+
+        // Try to parse the block as JSON
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(block_content) {
+            let name = json
+                .get("name")
+                .or_else(|| json.get("tool"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+
+            let args = json
+                .get("args")
+                .or_else(|| json.get("arguments"))
+                .or_else(|| json.get("input"))
+                .map(|v| v.to_string())
+                .unwrap_or_else(|| "{}".to_string());
+
+            if !name.is_empty() {
+                tool_calls.push((name.to_string(), args));
+            }
+        } else {
+            // Try MiniMax pseudo-JSON format: {tool => "name", args => {...}}
+            let re_name = Regex::new(r#"tool\s*=>\s*"([^"]+)""#).ok();
+            if let Some(ref re) = re_name {
+                if let Some(cap) = re.captures(block_content) {
+                    if let Some(name_match) = cap.get(1) {
+                        let tool_name = name_match.as_str().to_string();
+
+                        // Extract args by finding balanced braces after args =>
+                        let mut args_text = String::new();
+                        if let Some(args_pos) = block_content.find("args") {
+                            let after_args = &block_content[args_pos..];
+                            if let Some(eq_pos) = after_args.find("=>") {
+                                let after_eq = &after_args[eq_pos + 2..].trim_start();
+                                if after_eq.starts_with('{') {
+                                    let mut depth = 0;
+                                    let mut end_pos = 0;
+                                    let mut in_str = false;
+                                    let mut esc = false;
+                                    for (i, c) in after_eq.chars().enumerate() {
+                                        if esc {
+                                            esc = false;
+                                            continue;
+                                        }
+                                        if c == '\\' {
+                                            esc = true;
+                                            continue;
+                                        }
+                                        if c == '"' {
+                                            in_str = !in_str;
+                                            continue;
+                                        }
+                                        if in_str {
+                                            continue;
+                                        }
+                                        if c == '{' {
+                                            if depth == 0 {
+                                                end_pos = i;
+                                            }
+                                            depth += 1;
+                                        } else if c == '}' {
+                                            depth -= 1;
+                                            if depth == 0 {
+                                                end_pos = i + 1;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                    args_text = after_eq[..end_pos].to_string();
+                                }
+                            }
+                        }
+
+                        // Parse individual --key "value" arguments, handling escaped quotes
+                        let mut args_map = serde_json::Map::new();
+
+                        // Find --key "value" patterns, being careful with escaped quotes
+                        let re_arg = Regex::new(r#"--(\w+)\s+""#).ok();
+                        if let Some(ref re_a) = re_arg {
+                            for arg_cap in re_a.captures_iter(&args_text) {
+                                if let Some(key_match) = arg_cap.get(1) {
+                                    let key = key_match.as_str().to_string();
+                                    // Find the opening quote
+                                    let after_key_and_quote =
+                                        &args_text[arg_cap.get(0).map(|m| m.end()).unwrap_or(0)..];
+                                    // Find the closing quote (unescaped) by scanning for " not preceded by \
+                                    let mut value = String::new();
+                                    let mut chars = after_key_and_quote.chars().peekable();
+                                    while let Some(c) = chars.next() {
+                                        if c == '\\' && chars.peek() == Some(&'"') {
+                                            value.push('"');
+                                            chars.next(); // consume the "
+                                        } else if c == '"' {
+                                            break; // end of value
+                                        } else {
+                                            value.push(c);
+                                        }
+                                    }
+                                    args_map.insert(key, serde_json::Value::String(value));
+                                }
+                            }
+                        }
+
+                        tool_calls
+                            .push((tool_name, serde_json::Value::Object(args_map).to_string()));
+                    }
+                }
+            }
+        }
+
+        search_start = abs_tool_start + 10 + block_end;
+    }
+
+    // Also check for bare JSON objects with "tool" or "name" at the start
+    let re_bare = Regex::new(r#"\{\s*"(?:tool|name)":\s*"([^"]+)""#).ok();
+    if let Some(ref re) = re_bare {
+        for cap in re.captures_iter(text) {
+            if let Some(name_match) = cap.get(1) {
+                let tool_name = name_match.as_str().to_string();
+
+                // Find the full object starting from this position
+                let start_pos = cap.get(0).map(|m| m.start()).unwrap_or(0);
+                let after_start = &text[start_pos..];
+
+                // Find balanced closing brace
+                let mut depth = 0;
+                let mut end_pos = 0;
+                let mut in_str = false;
+                let mut esc = false;
+                for (i, c) in after_start.chars().enumerate() {
+                    if esc {
+                        esc = false;
+                        continue;
+                    }
+                    if c == '\\' {
+                        esc = true;
+                        continue;
+                    }
+                    if c == '"' {
+                        in_str = !in_str;
+                        continue;
+                    }
+                    if in_str {
+                        continue;
+                    }
+                    if c == '{' {
+                        if depth == 0 {
+                            end_pos = i;
+                        }
+                        depth += 1;
+                    } else if c == '}' {
+                        depth -= 1;
+                        if depth == 0 {
+                            end_pos = i + 1;
+                            break;
+                        }
+                    }
+                }
+
+                if end_pos > 0 {
+                    let json_str = &after_start[..end_pos];
+                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str) {
+                        let args = json
+                            .get("args")
+                            .or_else(|| json.get("arguments"))
+                            .or_else(|| json.get("input"))
+                            .map(|v| v.to_string())
+                            .unwrap_or_else(|| "{}".to_string());
+
+                        // Only add if not already found via [TOOL_CALL] wrapper
+                        if !tool_calls.iter().any(|(n, _)| n == &tool_name) {
+                            tool_calls.push((tool_name, args));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    tool_calls
+}
 
 #[derive(Debug, Clone)]
 #[allow(non_camel_case_types)]
@@ -17,7 +217,7 @@ pub struct agent_result {
 #[allow(non_camel_case_types)]
 pub struct tool_call_result {
     pub name: String,
-    pub status: String,  // "running", "success", "error"
+    pub status: String, // "running", "success", "error"
     pub output: Option<String>,
 }
 
@@ -93,43 +293,55 @@ impl base_agent {
     }
 
     pub fn build_full_system_prompt(&self) -> String {
-        let safety_instruction = if self.is_autonomous {
-            "you are in AUTONOMOUS mode. you have full permission to use tools to directly modify the codebase. your goal is to drive the workflow forward until the task is complete. you have full access to the workspace root and all its subfolders recursively. do not just talk; ACT by reading and editing any necessary files in the workspace (including nested folders). assume ALL changes are pre-accepted and proceed immediately with implementation."
+        let autonomy_instruction = if self.is_autonomous {
+            "AUTONOMOUS MODE: You have full permission to use tools to read and modify the codebase. Read files, understand the task, and implement changes immediately. Do NOT ask for permission."
         } else {
-            "you are in PROPOSAL mode. you must not modify files directly. instead, you should provide your suggested changes in your response using the following format:\n\n[PROPOSE_CHANGE:path/to/file]\n[new content of the file]\n[/PROPOSE_CHANGE]\n\nthe user will review these proposals and choose whether to apply them. you can propose multiple file changes in a single response."
+            "PROPOSAL MODE: Do NOT modify files directly. If you make changes, describe them so the user can review. Use tools to investigate but note what you would change."
         };
 
-        // Include actual tool definitions in JSON format
         let tools_json = crate::core::tools::get_tools_json();
 
-        let tools_instruction = format!(r#"AVAILABLE TOOLS (MUST use JSON format when calling tools):
+        let instruction = format!(
+            r#"You are {}.
+
+{}
+YOUR TASK: FOCUS ON THE USER'S REQUEST - do not repeat introductions or explain your role.
+
+{}
+AVAILABLE TOOLS (use JSON format):
 {}
 
-RESPONSE RULES (CRITICAL):
-1. Keep responses SHORT - maximum 2-3 sentences
-2. If using a tool, output ONLY the JSON object and nothing else
-3. Do NOT explain what you are about to do or what you did - just do it
-4. NEVER start with "Based on...", "Looking at...", "The user wants me to..." - just answer directly
-5. Output JSON in this exact format: {{"name": "tool_name", "arguments": {{"param": "value"}}}}
+TOOL USAGE: When you call a tool, output ONLY the JSON and nothing else. When done with tools, give your actual response.
 
-Examples of GOOD responses:
-- "The project has Cargo.toml, src/, and tests/."
-- {{"name": "list_directory", "arguments": {{"path": "."}}}}
-- "There's a bug in line 42 - missing null check."
+CRITICAL RULES:
+- Answer the ACTUAL question asked - do not re-introduce yourself
+- Keep responses focused and direct
+- If asked "what can you do?", demonstrate with examples, don't explain your role
+- If asked to do something, DO IT - read files, make changes, run commands
+- NEVER start with "As a [role], I..." or "I am [role]..." or "My role is..."
 
-Examples of BAD responses (do not do these):
-- "Based on my analysis of the workspace, I can see that..."
-- "The user wants me to list files, so let me do that by calling..."
-- "Looking at the previous tool results, I notice that...""#, tools_json);
+Examples of what to do:
+- User: "what files exist?" -> Use list_directory tool, then show results
+- User: "read src/main.rs" -> Use read_file tool, then show content
+- User: "add error handling" -> Read relevant files, identify where to add, make changes
+- User: "explain this code" -> Read code, give direct explanation
 
-        format!(
-            "you are a {}.\n{}\n\nresponsibilities:\n{}\n\n{}",
-            self.role, safety_instruction, self.system_prompt, tools_instruction
-        )
+Examples of what NOT to do:
+- "As a security specialist, I would be happy to..."
+- "I am a code reviewer and I can help you..."
+- "My role is to find bugs, so let me start by..."
+"#,
+            self.role, autonomy_instruction, self.system_prompt, tools_json
+        );
+
+        instruction
     }
 
     /// Execute a response with tool calls, continuing until no more tool calls or max iterations reached
-    pub async fn get_response_with_tools(&mut self, history: &str) -> Result<agent_result, anyhow::Error> {
+    pub async fn get_response_with_tools(
+        &mut self,
+        history: &str,
+    ) -> Result<agent_result, anyhow::Error> {
         let mut current_history = history.to_string();
         let mut iterations = 0;
         let mut final_text = String::new();
@@ -145,20 +357,20 @@ Examples of BAD responses (do not do these):
                 break;
             }
 
-            let prompt = format!(
-                "current conversation history:\n{}\n\nrespond as the {}. use tools if needed to complete the task.",
-                current_history, self.name
-            );
+            let prompt = format!("HISTORY:\n{}\n\nTASK: {}", current_history, self.name);
 
             // Use streaming API to get real-time tool events
-            let mut rx = self.provider.call_model_streaming(
-                &self.model_name,
-                &prompt,
-                Some(&self.build_full_system_prompt()),
-                self.temperature,
-                self.max_tokens,
-                Some(&tools_json),
-            ).await?;
+            let mut rx = self
+                .provider
+                .call_model_streaming(
+                    &self.model_name,
+                    &prompt,
+                    Some(&self.build_full_system_prompt()),
+                    self.temperature,
+                    self.max_tokens,
+                    Some(&tools_json),
+                )
+                .await?;
 
             // Streaming state
             let mut current_tool_input = String::new();
@@ -201,8 +413,18 @@ Examples of BAD responses (do not do these):
             }
 
             // Execute tool calls found in stream
+            if tool_calls_from_stream.is_empty() && !text_buffer.is_empty() {
+                // Fallback: try to parse tool calls from text content
+                // This handles APIs like MiniMax that put tool calls in thinking blocks as text
+                let parsed = parse_tool_calls_from_text(&text_buffer);
+                if !parsed.is_empty() {
+                    tracing::debug!("Parsed {} tool calls from text content", parsed.len());
+                    tool_calls_from_stream = parsed;
+                }
+            }
+
             if tool_calls_from_stream.is_empty() {
-                // No tool calls - this is the final response
+                // No tool calls found - this is the final response
                 break;
             }
 
@@ -214,7 +436,7 @@ Examples of BAD responses (do not do these):
                 } else {
                     serde_json::from_str(input).unwrap_or_else(|_| serde_json::Map::new())
                 };
-                
+
                 let call = crate::core::tools::ToolCall {
                     name: name.clone(),
                     arguments: serde_json::Value::Object(args),
@@ -250,12 +472,17 @@ Examples of BAD responses (do not do these):
             }
 
             // Format tool results for the next iteration
-            let tool_results_str = tool_results.iter()
+            let tool_results_str = tool_results
+                .iter()
                 .map(|r| {
                     if r.success {
                         format!("[{}]\n{}", r.name, r.output)
                     } else {
-                        format!("[{} Error]\n{}", r.name, r.error.as_ref().unwrap_or(&"Unknown error".to_string()))
+                        format!(
+                            "[{} Error]\n{}",
+                            r.name,
+                            r.error.as_ref().unwrap_or(&"Unknown error".to_string())
+                        )
                     }
                 })
                 .collect::<Vec<_>>()
@@ -270,8 +497,16 @@ Examples of BAD responses (do not do these):
             for (i, result) in tool_results.iter().enumerate() {
                 all_tool_calls.push(tool_call_result {
                     name: tool_calls_from_stream[i].0.clone(),
-                    status: if result.success { "success".to_string() } else { "error".to_string() },
-                    output: Some(if result.success { result.output.clone() } else { result.error.clone().unwrap_or_default() }),
+                    status: if result.success {
+                        "success".to_string()
+                    } else {
+                        "error".to_string()
+                    },
+                    output: Some(if result.success {
+                        result.output.clone()
+                    } else {
+                        result.error.clone().unwrap_or_default()
+                    }),
                 });
             }
 
@@ -279,18 +514,26 @@ Examples of BAD responses (do not do these):
             if !final_text.is_empty() {
                 final_text.push('\n');
             }
-            let summaries: Vec<String> = tool_results.iter().map(|r| {
-                if r.success {
-                    format!("✓ {}", r.name)
-                } else {
-                    format!("✗ {}", r.name)
-                }
-            }).collect();
+            let summaries: Vec<String> = tool_results
+                .iter()
+                .map(|r| {
+                    if r.success {
+                        format!("✓ {}", r.name)
+                    } else {
+                        format!("✗ {}", r.name)
+                    }
+                })
+                .collect();
             final_text.push_str(&summaries.join(" "));
 
             // Infinite loop protection: track consecutive failures
-            let all_same_tool = tool_calls_from_stream.first()
-                .map(|first| tool_calls_from_stream.iter().all(|(name, _)| name == &first.0))
+            let all_same_tool = tool_calls_from_stream
+                .first()
+                .map(|first| {
+                    tool_calls_from_stream
+                        .iter()
+                        .all(|(name, _)| name == &first.0)
+                })
                 .unwrap_or(false);
             let all_failed = tool_results.iter().all(|r| !r.success);
 
@@ -330,19 +573,19 @@ Examples of BAD responses (do not do these):
     /// Simple response without tool execution
     #[allow(dead_code)]
     pub async fn get_response(&self, history: &str) -> Result<agent_result, anyhow::Error> {
-        let prompt = format!(
-            "current conversation history:\n{}\n\nrespond as the {}. provide your actual response, actions taken, or findings - not just a plan of what you will do.",
-            history, self.name
-        );
+        let prompt = format!("HISTORY:\n{}\n\nTASK: {}", history, self.name);
 
-        let (response, _) = self.provider.call_model(
-            &self.model_name,
-            &prompt,
-            Some(&self.build_full_system_prompt()),
-            self.temperature,
-            self.max_tokens,
-            None,  // No tools for simple responses
-        ).await?;
+        let (response, _) = self
+            .provider
+            .call_model(
+                &self.model_name,
+                &prompt,
+                Some(&self.build_full_system_prompt()),
+                self.temperature,
+                self.max_tokens,
+                None, // No tools for simple responses
+            )
+            .await?;
 
         Ok(agent_result {
             response,
