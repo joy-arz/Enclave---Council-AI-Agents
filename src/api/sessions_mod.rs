@@ -24,18 +24,13 @@ pub struct SessionMeta {
     pub session_summary: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub enum SessionStatus {
+    #[default]
     Active,
     Completed,
     Failed,
     Archived,
-}
-
-impl Default for SessionStatus {
-    fn default() -> Self {
-        SessionStatus::Active
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

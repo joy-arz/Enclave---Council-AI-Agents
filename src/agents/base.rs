@@ -12,6 +12,9 @@ use std::sync::Arc;
 fn parse_tool_calls_from_text(text: &str) -> Vec<(String, String)> {
     let mut tool_calls = Vec::new();
 
+    let re_name = Regex::new(r#"tool\s*=>\s*"([^"]+)""#).ok();
+    let re_arg = Regex::new(r#"--(\w+)\s+""#).ok();
+
     // Try to find complete tool call objects in the text
     // Match [TOOL_CALL] blocks - end is marked by [/TOOL_CALL]
     let mut search_start = 0;
@@ -46,7 +49,6 @@ fn parse_tool_calls_from_text(text: &str) -> Vec<(String, String)> {
             }
         } else {
             // Try MiniMax pseudo-JSON format: {tool => "name", args => {...}}
-            let re_name = Regex::new(r#"tool\s*=>\s*"([^"]+)""#).ok();
             if let Some(ref re) = re_name {
                 if let Some(cap) = re.captures(block_content) {
                     if let Some(name_match) = cap.get(1) {
@@ -101,7 +103,6 @@ fn parse_tool_calls_from_text(text: &str) -> Vec<(String, String)> {
                         let mut args_map = serde_json::Map::new();
 
                         // Find --key "value" patterns, being careful with escaped quotes
-                        let re_arg = Regex::new(r#"--(\w+)\s+""#).ok();
                         if let Some(ref re_a) = re_arg {
                             for arg_cap in re_a.captures_iter(&args_text) {
                                 if let Some(key_match) = arg_cap.get(1) {

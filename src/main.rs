@@ -5,11 +5,12 @@ mod core;
 mod utils;
 
 use axum::{
-    routing::{get, post},
+    routing::{get, post, put},
     Router,
 };
 use clap::Parser;
 use std::sync::Arc;
+use std::net::SocketAddr;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
@@ -23,6 +24,8 @@ use crate::core::providers_mod::factory;
 use crate::utils::config;
 use crate::utils::constants::{RATE_LIMIT_MAX_TOKENS, RATE_LIMIT_REFILL_RATE};
 use crate::utils::logger_mod::session_logger;
+use crate::utils::config_manager::ConfigManager;
+use crate::api::AppState;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -59,6 +62,17 @@ async fn run_server(cfg: Arc<config>, store: Arc<session_store>) -> Result<(), a
         RATE_LIMIT_REFILL_RATE,
     ));
 
+    // Create ConfigManager for API config management
+    let config_manager = Arc::new(ConfigManager::new(&cfg.workspace_dir));
+
+    // Create shared application state
+    let app_state = AppState {
+        config: cfg.clone(),
+        session_store: store.clone(),
+        rate_limiter: rate_limiter.clone(),
+        config_manager,
+    };
+
     let app = Router::new()
         .route("/api/enclave", get(api::handle_enclave))
         .route("/api/browse", get(api::routes::browse_workspace))
@@ -73,12 +87,15 @@ async fn run_server(cfg: Arc<config>, store: Arc<session_store>) -> Result<(), a
             "/api/sessions/:session_id",
             axum::routing::delete(api::routes::delete_session),
         )
+        .route("/api/config", get(api::config_routes::get_config))
+        .route("/api/config", put(api::config_routes::update_config))
+        .route("/api/config/validate", post(api::config_routes::validate_config))
         .nest_service("/static", ServeDir::new("src/ui"))
         .route(
             "/",
             get(|| async { axum::response::Html(include_str!("ui/index.html")) }),
         )
-        .with_state((cfg.clone(), store.clone(), rate_limiter.clone()))
+        .with_state(app_state)
         .layer(CorsLayer::permissive());
 
     let addr = format!("{}:{}", cfg.host, cfg.port);
@@ -99,7 +116,8 @@ async fn run_server(cfg: Arc<config>, store: Arc<session_store>) -> Result<(), a
     // Add timeout to graceful shutdown
     let shutdown_result = tokio::time::timeout(
         std::time::Duration::from_secs(crate::utils::constants::SHUTDOWN_TIMEOUT_SECS),
-        axum::serve(listener, app).with_graceful_shutdown(shutdown_signal),
+        axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>())
+        .with_graceful_shutdown(shutdown_signal),
     )
     .await;
 
@@ -142,40 +160,65 @@ async fn run_cli(cfg: Arc<config>, args: cli_args) -> Result<(), anyhow::Error> 
         &cfg.strategist_binary,
         ws.clone(),
         cfg.minimax_api_key.clone(),
+        cfg.openai_api_key.clone(),
+        cfg.anthropic_api_key.clone(),
+        cfg.openrouter_api_key.clone(),
         Some(cfg.minimax_model.clone()),
         Some(cfg.minimax_base_url.clone()),
+        Some(cfg.openrouter_model.clone()),
+        Some(cfg.openrouter_base_url.clone()),
         cfg.autonomous_mode,
     );
     let critic_provider = factory::create_provider(
         &cfg.critic_binary,
         ws.clone(),
         cfg.minimax_api_key.clone(),
+        cfg.openai_api_key.clone(),
+        cfg.anthropic_api_key.clone(),
+        cfg.openrouter_api_key.clone(),
         Some(cfg.minimax_model.clone()),
         Some(cfg.minimax_base_url.clone()),
+        Some(cfg.openrouter_model.clone()),
+        Some(cfg.openrouter_base_url.clone()),
         cfg.autonomous_mode,
     );
     let optimizer_provider = factory::create_provider(
         &cfg.optimizer_binary,
         ws.clone(),
         cfg.minimax_api_key.clone(),
+        cfg.openai_api_key.clone(),
+        cfg.anthropic_api_key.clone(),
+        cfg.openrouter_api_key.clone(),
         Some(cfg.minimax_model.clone()),
         Some(cfg.minimax_base_url.clone()),
+        Some(cfg.openrouter_model.clone()),
+        Some(cfg.openrouter_base_url.clone()),
         cfg.autonomous_mode,
     );
     let contrarian_provider = factory::create_provider(
         &cfg.contrarian_binary,
         ws.clone(),
         cfg.minimax_api_key.clone(),
+        cfg.openai_api_key.clone(),
+        cfg.anthropic_api_key.clone(),
+        cfg.openrouter_api_key.clone(),
         Some(cfg.minimax_model.clone()),
         Some(cfg.minimax_base_url.clone()),
+        Some(cfg.openrouter_model.clone()),
+        Some(cfg.openrouter_base_url.clone()),
         cfg.autonomous_mode,
     );
     let judge_provider = factory::create_provider(
         &cfg.judge_binary,
         ws.clone(),
         cfg.minimax_api_key.clone(),
+        cfg.openai_api_key.clone(),
+        cfg.anthropic_api_key.clone(),
+        cfg.openrouter_api_key.clone(),
         Some(cfg.minimax_model.clone()),
         Some(cfg.minimax_base_url.clone()),
+        Some(cfg.openrouter_model.clone()),
+        Some(cfg.openrouter_base_url.clone()),
         cfg.autonomous_mode,
     );
 

@@ -5,20 +5,15 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Represents the current state of the agent for UI display
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum BusyState {
+    #[default]
     Idle,
     Thinking,
     Streaming,
     ToolRunning,
     ApprovalPending,
     Error,
-}
-
-impl Default for BusyState {
-    fn default() -> Self {
-        BusyState::Idle
-    }
 }
 
 /// Agent events for streaming and logging

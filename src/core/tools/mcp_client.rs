@@ -1,10 +1,20 @@
 use crate::core::tools::ToolResult;
+use once_cell::sync::Lazy;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+const MAX_POOL_SIZE: usize = 5;
+const POOL_TTL: Duration = Duration::from_secs(60);
+
+type Pool = HashMap<String, (McpClient, Instant)>;
+
+static MCP_POOL: Lazy<Mutex<Pool>> = Lazy::new(|| Mutex::new(HashMap::new()));
 
 /// MCP server configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,7 +110,6 @@ impl McpClient {
             }),
         )?;
 
-        // Send notifications/initialized after successful initialize
         self.notify(
             "notifications/initialized",
             Value::Object(Default::default()),
@@ -135,11 +144,8 @@ impl McpClient {
 
     /// Gracefully shutdown the MCP server
     pub fn shutdown(&mut self) {
-        // Send shutdown request
         let _ = self.request("shutdown", Value::Null);
-        // Send exit notification
         let _ = self.notify("exit", Value::Null);
-        // Kill the child process
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
@@ -197,6 +203,60 @@ impl McpClient {
     }
 }
 
+struct PooledClient {
+    key: String,
+    client: Option<McpClient>,
+}
+
+impl PooledClient {
+    fn new(key: String, client: McpClient) -> Self {
+        Self {
+            key,
+            client: Some(client),
+        }
+    }
+
+    fn return_to_pool(&mut self) {
+        if let Some(client) = self.client.take() {
+            let mut pool = MCP_POOL.lock().unwrap();
+            if pool.len() < MAX_POOL_SIZE {
+                pool.insert(self.key.clone(), (client, Instant::now()));
+            }
+        }
+    }
+}
+
+impl Drop for PooledClient {
+    fn drop(&mut self) {
+        if let Some(mut client) = self.client.take() {
+            let mut pool = MCP_POOL.lock().unwrap();
+            if pool.len() < MAX_POOL_SIZE {
+                pool.insert(self.key.clone(), (client, Instant::now()));
+            } else {
+                client.shutdown();
+            }
+        }
+    }
+}
+
+fn get_or_spawn(
+    workspace_root: &Path,
+    server_config: &McpServerConfig,
+) -> Result<PooledClient, String> {
+    let key = server_config.name.clone();
+    let mut pool = MCP_POOL.lock().unwrap();
+
+    if let Some((_, (old_client, last_used))) = pool.remove_entry(&key) {
+        if Instant::now().duration_since(last_used) < POOL_TTL {
+            return Ok(PooledClient::new(key, old_client));
+        }
+    }
+
+    drop(pool);
+    let client = McpClient::spawn(workspace_root, server_config)?;
+    Ok(PooledClient::new(server_config.name.clone(), client))
+}
+
 /// Execute an MCP tool call and return the result
 pub fn execute_mcp_tool(
     workspace_root: &Path,
@@ -204,7 +264,7 @@ pub fn execute_mcp_tool(
     tool_name: &str,
     input: Value,
 ) -> ToolResult {
-    let mut client = match McpClient::spawn(workspace_root, server_config) {
+    let mut client = match get_or_spawn(workspace_root, server_config) {
         Ok(client) => client,
         Err(err) => {
             return ToolResult {
@@ -216,7 +276,7 @@ pub fn execute_mcp_tool(
         }
     };
 
-    if let Err(err) = client.initialize() {
+    if let Err(err) = client.client.as_mut().unwrap().initialize() {
         return ToolResult {
             name: tool_name.to_string(),
             success: false,
@@ -225,9 +285,9 @@ pub fn execute_mcp_tool(
         };
     }
 
-    match client.call_tool(tool_name, input) {
+    match client.client.as_mut().unwrap().call_tool(tool_name, input) {
         Ok(result) => {
-            client.shutdown();
+            client.return_to_pool();
             let output = serde_json::to_string(&result).unwrap_or_else(|_| String::new());
             ToolResult {
                 name: tool_name.to_string(),
@@ -237,7 +297,9 @@ pub fn execute_mcp_tool(
             }
         }
         Err(err) => {
-            client.shutdown();
+            if let Some(mut c) = client.client.take() {
+                c.shutdown();
+            }
             ToolResult {
                 name: tool_name.to_string(),
                 success: false,
@@ -277,7 +339,6 @@ fn mcp_tool_name(server_name: &str, tool_name: &str) -> String {
 fn get_mcp_servers() -> Vec<McpServerConfig> {
     let mut servers = Vec::new();
 
-    // Try MCP_CONFIG JSON environment variable
     if let Ok(config_json) = std::env::var("MCP_CONFIG") {
         if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&config_json) {
             if let Some(server_list) = parsed.get("servers").and_then(|s| s.as_array()) {
@@ -290,8 +351,6 @@ fn get_mcp_servers() -> Vec<McpServerConfig> {
         }
     }
 
-    // Also support comma-separated server configs in MCP_SERVERS
-    // Format: name:command:arg1,arg2
     if let Ok(mcp_servers) = std::env::var("MCP_SERVERS") {
         for server_str in mcp_servers.split('|') {
             if let Some(config) = parse_mcp_server_from_string(server_str) {
@@ -352,7 +411,6 @@ fn parse_mcp_server_from_string(s: &str) -> Option<McpServerConfig> {
     let name = parts[0].to_string();
     let command = parts[1].to_string();
 
-    // Parse args (comma-separated)
     let args: Vec<String> = if parts.len() > 2 {
         parts[2]
             .split(',')
@@ -363,7 +421,6 @@ fn parse_mcp_server_from_string(s: &str) -> Option<McpServerConfig> {
         Vec::new()
     };
 
-    // Parse env vars (key=val pairs)
     let mut env = HashMap::new();
     if parts.len() > 2 {
         for part in parts[2].split(',') {
@@ -400,20 +457,16 @@ fn parse_mcp_server_from_string(s: &str) -> Option<McpServerConfig> {
 pub fn execute_mcp_tool_matching(
     tool_name: &str,
     args: &serde_json::Value,
-    workspace_dir: &PathBuf,
+    workspace_dir: &Path,
 ) -> Option<ToolResult> {
-    // Parse the tool name to get server and tool names
     let (server_name, tool_name_only) = parse_mcp_tool_name(tool_name)?;
 
-    // Get MCP servers from environment/config
     let servers = get_mcp_servers();
 
-    // Find the server configuration
     let server_config = servers
         .iter()
         .find(|s| s.name == server_name && s.enabled)?;
 
-    // Execute the tool
     Some(execute_mcp_tool(
         workspace_dir,
         server_config,
@@ -430,83 +483,85 @@ pub fn get_mcp_tool_definitions() -> Vec<crate::core::tools::ToolDefinition> {
     let mut tools = Vec::new();
 
     for server in servers.iter().filter(|s| s.enabled) {
-        // Spawn a temporary client just to list tools
-        match McpClient::spawn(std::path::Path::new("/tmp"), server) {
-            Ok(mut client) => {
-                if client.initialize().is_ok() {
-                    match client.list_tools() {
-                        Ok(mcp_tools) => {
-                            for mcp_tool in mcp_tools {
-                                let full_name = mcp_tool_name(&server.name, &mcp_tool.name);
-                                let description = mcp_tool.description.unwrap_or_else(|| {
-                                    format!(
-                                        "MCP tool '{}' from server '{}'",
-                                        mcp_tool.name, server.name
-                                    )
-                                });
-
-                                // Convert MCP input schema to our ToolParam format
-                                let mut parameters = Vec::new();
-                                if let Some(props) = mcp_tool.input_schema.properties {
-                                    for (name, prop) in props {
-                                        let param_type = prop
-                                            .as_object()
-                                            .and_then(|o| o.get("type"))
-                                            .and_then(|t| t.as_str())
-                                            .unwrap_or("string")
-                                            .to_string();
-
-                                        let description = prop
-                                            .as_object()
-                                            .and_then(|o| o.get("description"))
-                                            .and_then(|d| d.as_str())
-                                            .unwrap_or("")
-                                            .to_string();
-
-                                        let required = mcp_tool
-                                            .input_schema
-                                            .required
-                                            .as_ref()
-                                            .map(|r| r.contains(&name))
-                                            .unwrap_or(false);
-
-                                        parameters.push(crate::core::tools::ToolParam {
-                                            name,
-                                            description,
-                                            param_type,
-                                            required,
-                                        });
-                                    }
-                                }
-
-                                tools.push(crate::core::tools::ToolDefinition {
-                                    name: full_name,
-                                    description,
-                                    parameters,
-                                });
-                            }
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to list tools from MCP server '{}': {}",
-                                server.name,
-                                e
-                            );
-                        }
-                    }
-                }
-                let _ = client.shutdown();
-            }
+        let mut client = match get_or_spawn(std::path::Path::new("/tmp"), server) {
+            Ok(client) => client,
             Err(e) => {
                 tracing::warn!("Failed to spawn MCP server '{}': {}", server.name, e);
+                continue;
+            }
+        };
+
+        let client_mut = client.client.as_mut().unwrap();
+        if client_mut.initialize().is_err() {
+            continue;
+        }
+
+        match client_mut.list_tools() {
+            Ok(mcp_tools) => {
+                for mcp_tool in mcp_tools {
+                    let full_name = mcp_tool_name(&server.name, &mcp_tool.name);
+                    let description = mcp_tool.description.unwrap_or_else(|| {
+                        format!(
+                            "MCP tool '{}' from server '{}'",
+                            mcp_tool.name, server.name
+                        )
+                    });
+
+                    let mut parameters = Vec::new();
+                    if let Some(props) = mcp_tool.input_schema.properties {
+                        for (name, prop) in props {
+                            let param_type = prop
+                                .as_object()
+                                .and_then(|o| o.get("type"))
+                                .and_then(|t| t.as_str())
+                                .unwrap_or("string")
+                                .to_string();
+
+                            let description = prop
+                                .as_object()
+                                .and_then(|o| o.get("description"))
+                                .and_then(|d| d.as_str())
+                                .unwrap_or("")
+                                .to_string();
+
+                            let required = mcp_tool
+                                .input_schema
+                                .required
+                                .as_ref()
+                                .map(|r| r.contains(&name))
+                                .unwrap_or(false);
+
+                            parameters.push(crate::core::tools::ToolParam {
+                                name,
+                                description,
+                                param_type,
+                                required,
+                            });
+                        }
+                    }
+
+                    tools.push(crate::core::tools::ToolDefinition {
+                        name: full_name,
+                        description,
+                        parameters,
+                    });
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to list tools from MCP server '{}': {}",
+                    server.name,
+                    e
+                );
             }
         }
+
+        client.return_to_pool();
     }
 
     tools
 }
 
-/// Try to execute a tool as an MCP tool
 #[cfg(test)]
 mod tests {
     use super::*;

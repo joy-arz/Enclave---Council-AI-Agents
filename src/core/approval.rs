@@ -15,7 +15,7 @@ pub enum PermissionTier {
 }
 
 /// Permission mode for the agent
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum PermissionMode {
     /// Everything allowed (autonomous mode)
     BypassPermissions,
@@ -26,13 +26,8 @@ pub enum PermissionMode {
     /// Read-only + file edits denied (strict proposal mode)
     DontAsk,
     /// Ask for everything not explicitly allowed (default)
+    #[default]
     Default,
-}
-
-impl Default for PermissionMode {
-    fn default() -> Self {
-        PermissionMode::Default
-    }
 }
 
 /// Approval policy configuration

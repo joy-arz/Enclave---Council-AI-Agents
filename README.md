@@ -129,16 +129,19 @@ flowchart LR
 - **Parallel deliberation** - Agents think simultaneously (like your brain during a debate)
 - **Tool Arsenal (21 tools)** - read_file, write_file, grep, glob, edit_file, and friends
 - **MCP Support** - Bring your own tools from the Model Context Protocol ecosystem
+- **MCP Connection Pooling** - Reuses MCP server connections for faster tool execution
 - **Context Management** - Auto-summarizes long conversations before tokens go kaboom
 - **Permission Modes** - Plan mode (read-only), Autonomy mode (do-whatever), or something in between
 - **Session Persistence** - Pick up exactly where you left off
 - **Real-time Streaming** - Watch the chaos unfold via SSE
+- **Web Configuration API** - Configure API keys and settings via `/api/config` endpoint
 
 ### The Interface
 - **Web Dashboard** - Fancy dark mode UI (your eyes will thank you)
 - **CLI Mode** - For the terminal purists
 - **Folder Picker** - Click click done
 - **Session Management** - Save, resume, clear, start over
+- **Configuration API** - Configure via web UI or REST API
 
 ---
 
@@ -300,12 +303,24 @@ Found a bug? Have a feature request? Want to contribute code? The Critic will ju
 
 1. **Fork it** (the repo, not the project maintainer's sanity)
 2. **Create your feature branch** (`git checkout -b feature/cool-thing`)
-3. **Commit your changes** (`git commit -m 'Add cool thing'`, be honest, we all copy-paste Stack Overflow anyway)
-4. **Push to the branch** (`git push origin feature/cool-thing`)
-5. **Open a Pull Request** (PRs are like 同人作品, someone else's work you want to officially adopt)
-6. **Wait for the Critic to review** (they will find something. They always do. It's their purpose.)
+3. **Run tests** (`cargo test` - all 17 tests must pass)
+4. **Run clippy** (`cargo clippy` - no warnings)
+5. **Commit your changes** (`git commit -m 'Add cool thing'`, be honest, we all copy-paste Stack Overflow anyway)
+6. **Push to the branch** (`git push origin feature/cool-thing`)
+7. **Open a Pull Request** (PRs are like 同人作品, someone else's work you want to officially adopt)
+8. **Wait for the Critic to review** (they will find something. They always do. It's their purpose.)
 
 *Warning: The Critic has never met a codebase they couldn't find issues with. This is a feature, not a bug. Unless told otherwise, by who you may ask? By me.*
+
+---
+
+## Recent Improvements
+
+- **MCP Connection Pooling** - Reuses MCP server connections for 200-600ms faster tool calls
+- **Buffered Logging** - Removed disk sync on every log for better performance
+- **Batched SSE Streaming** - CLI responses now stream in chunks instead of character-by-character
+- **Real Client IP** - Rate limiting now uses actual client IP from TCP connection
+- **Web Config API** - Configure API keys and settings via `/api/config` endpoint
 
 ---
 

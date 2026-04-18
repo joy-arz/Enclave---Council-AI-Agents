@@ -1,5 +1,5 @@
 use tokio::fs::{File, OpenOptions};
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncWriteExt, BufWriter};
 use std::path::PathBuf;
 use chrono::Local;
 use serde::Serialize;
@@ -131,22 +131,22 @@ impl session_logger {
         }
 
         let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
-        let mut file = OpenOptions::new()
+        let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&self.log_path)
             .await?;
+        let mut writer = BufWriter::new(file);
 
-        // Redact sensitive data before logging
         let redacted_message = redact_sensitive_data(message);
-        let entry = if redacted_message.starts_with("#") || redacted_message.starts_with("---") {
+        let entry = if redacted_message.starts_with('#') || redacted_message.starts_with("---") {
             format!("{}\n", redacted_message)
         } else {
             format!("[{}] {}\n", timestamp, redacted_message)
         };
 
-        file.write_all(entry.as_bytes()).await?;
-        file.sync_all().await.map_err(std::io::Error::other)?;
+        writer.write_all(entry.as_bytes()).await?;
+        writer.flush().await?;
 
         Ok(())
     }

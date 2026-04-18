@@ -30,22 +30,18 @@ impl RateLimiter {
 
     /// Try to acquire a token. Returns true if allowed, false if rate limited.
     pub async fn try_acquire(&self) -> bool {
-        // Refill tokens based on elapsed time
-        let elapsed = {
-            let last_refill = self.last_refill.lock().await;
-            last_refill.elapsed().as_secs_f64()
-        };
-
+        // Single critical section for atomic refill + acquire
+        let mut tokens = self.tokens.lock().await;
+        let mut last_refill = self.last_refill.lock().await;
+        
+        let elapsed = last_refill.elapsed().as_secs_f64();
         let tokens_to_add = elapsed * self.refill_rate;
 
         if tokens_to_add >= 1.0 {
-            let mut tokens = self.tokens.lock().await;
-            let mut last_refill = self.last_refill.lock().await;
-            *tokens = (*tokens).min(self.max_tokens) + tokens_to_add as usize;
+            *tokens = (*tokens + tokens_to_add as usize).min(self.max_tokens);
             *last_refill = Instant::now();
         }
 
-        let mut tokens = self.tokens.lock().await;
         if *tokens > 0 {
             *tokens -= 1;
             true
@@ -79,21 +75,11 @@ impl IpRateLimiter {
 
     /// Check if request from IP is allowed
     pub async fn try_acquire(&self, ip: &str) -> bool {
-        // Get or create limiter for this IP
-        {
-            let mut limiters = self.limiters.lock().await;
-            if !limiters.contains_key(ip) {
-                limiters.insert(ip.to_string(), RateLimiter::new(self.max_tokens, self.refill_rate));
-            }
-        }
-
-        // Now try to acquire
-        let limiters = self.limiters.lock().await;
-        if let Some(limiter) = limiters.get(ip) {
-            limiter.try_acquire().await
-        } else {
-            true
-        }
+        let mut limiters = self.limiters.lock().await;
+        let limiter = limiters
+            .entry(ip.to_string())
+            .or_insert_with(|| RateLimiter::new(self.max_tokens, self.refill_rate));
+        limiter.try_acquire().await
     }
 
     /// Get remaining requests for IP

@@ -1,5 +1,4 @@
 //! Skills system for Enclave
-//! Inspired by nca AGENTS.md parsing for skill discovery and invocation
 
 use crate::core::approval::PermissionMode;
 use regex::Regex;
